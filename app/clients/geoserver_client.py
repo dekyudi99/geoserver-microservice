@@ -1,4 +1,4 @@
-import os
+﻿import os
 import requests
 from requests.auth import HTTPBasicAuth
 from typing import Dict, Any, List, Optional
@@ -35,7 +35,7 @@ class GeoServerClient:
             logger.error(f"GeoServer request failed [{method} {url}]: {e}")
             raise
 
-    # ── WORKSPACE OPERATIONS ─────────────────────────────────────────
+    # โ”€โ”€ WORKSPACE OPERATIONS โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def get_workspaces(self) -> List[Dict[str, Any]]:
         res = self._request("GET", "/rest/workspaces.json")
@@ -72,7 +72,7 @@ class GeoServerClient:
         )
         return res.status_code in (200, 204)
 
-    # ── DATASTORE OPERATIONS (VECTOR) ───────────────────────────────
+    # โ”€โ”€ DATASTORE OPERATIONS (VECTOR) โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def get_datastores(self, workspace_name: Optional[str] = None) -> List[Dict[str, Any]]:
         path = f"/rest/workspaces/{workspace_name}/datastores.json" if workspace_name else "/rest/datastores.json"
@@ -132,7 +132,7 @@ class GeoServerClient:
         )
         return res.status_code in (200, 201)
 
-    # ── COVERAGE STORE OPERATIONS (RASTER) ──────────────────────────
+    # โ”€โ”€ COVERAGE STORE OPERATIONS (RASTER) โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def get_coverage_stores(self, workspace_name: Optional[str] = None) -> List[Dict[str, Any]]:
         path = f"/rest/workspaces/{workspace_name}/coveragestores.json" if workspace_name else "/rest/coveragestores.json"
@@ -168,7 +168,7 @@ class GeoServerClient:
         )
         return res.status_code in (200, 204)
 
-    # ── FEATURE TYPES & PUBLISH ──────────────────────────────────────
+    # โ”€โ”€ FEATURE TYPES & PUBLISH โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def publish_postgis_feature_type(
         self,
@@ -202,7 +202,7 @@ class GeoServerClient:
         )
         return res.status_code in (200, 204)
 
-    # ── STYLES & SLD ────────────────────────────────────────────────
+    # โ”€โ”€ STYLES & SLD โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def style_exists(self, style_name: str) -> bool:
         clean_name = os.path.splitext(style_name)[0].replace('.', '_')
@@ -252,7 +252,7 @@ class GeoServerClient:
         res_global = self._request("PUT", url_global, json=body)
         return res_global.status_code in (200, 201)
 
-    # ── WMS / WFS CAPABILITIES ───────────────────────────────────────
+    # โ”€โ”€ WMS / WFS CAPABILITIES โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def get_wms_capabilities(self, workspace_name: Optional[str] = None) -> Dict[str, Any]:
         prefix = f"/{workspace_name}" if workspace_name else ""
@@ -261,8 +261,6 @@ class GeoServerClient:
         if res.status_code == 200:
             return xmltodict.parse(res.text)
         raise RuntimeError(f"Gagal mengambil WMS capabilities: {res.text}")
-
-geoserver_client = GeoServerClient()
 
     def delete_style(self, style_name: str, workspace_name: Optional[str] = None, recurse: bool = True) -> bool:
         if workspace_name:
@@ -293,3 +291,6 @@ geoserver_client = GeoServerClient()
         if res.status_code == 200:
             return res.json()
         return {"status": "available"}
+
+geoserver_client = GeoServerClient()
+
