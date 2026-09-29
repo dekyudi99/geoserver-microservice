@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  geoserver-microservice:
+    build: .
+    container_name: geoserver-microservice
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - PORT=8001
+      - GEOSERVER_URL=http://geoserver:8080/geoserver
+      - GEOSERVER_USER=admin
+      - GEOSERVER_PASS=geoserver
+      - GEOSERVER_WMS_URL=http://localhost:8080/geoserver
+      - DATABASE_URL=postgresql://postgres:postgres@postgis:5432/geoserver_spatial_db
+      - POSTGIS_HOST=postgis
+      - POSTGIS_PORT=5432
+      - POSTGIS_DB=geoserver_spatial_db
+      - POSTGIS_USER=postgres
+      - POSTGIS_PASSWORD=postgres
+      - DATA_RASTER_PATH=/data_raster
+      - DATA_VECTOR_PATH=/data_vector
+      - SIMPLIFY_TOLERANCE=0.0001
+    volumes:
+      - raster_data:/data_raster
+      - vector_data:/data_vector
+    networks:
+      - gis-network
+
+volumes:
+  raster_data:
+  vector_data:
+
+networks:
+  gis-network:
+    external: true
