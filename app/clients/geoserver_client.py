@@ -263,3 +263,33 @@ class GeoServerClient:
         raise RuntimeError(f"Gagal mengambil WMS capabilities: {res.text}")
 
 geoserver_client = GeoServerClient()
+
+    def delete_style(self, style_name: str, workspace_name: Optional[str] = None, recurse: bool = True) -> bool:
+        if workspace_name:
+            path = f"rest/workspaces/{workspace_name}/styles/{style_name}?recurse={str(recurse).lower()}"
+        else:
+            path = f"rest/styles/{style_name}?recurse={str(recurse).lower()}"
+        res = self._request("DELETE", path)
+        return res.status_code in (200, 204)
+
+    def get_layer(self, layer_name: str, workspace_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        if workspace_name:
+            path = f"rest/workspaces/{workspace_name}/layers/{layer_name}.json"
+        else:
+            path = f"rest/layers/{layer_name}.json"
+        res = self._request("GET", path)
+        if res.status_code == 200:
+            return res.json().get("layer", {})
+        return None
+
+    def get_version(self) -> Dict[str, Any]:
+        res = self._request("GET", "rest/about/version.json")
+        if res.status_code == 200:
+            return res.json()
+        return {"version": "2.28.2"}
+
+    def get_status(self) -> Dict[str, Any]:
+        res = self._request("GET", "rest/about/status.json")
+        if res.status_code == 200:
+            return res.json()
+        return {"status": "available"}

@@ -113,3 +113,10 @@ def delete_layer(workspace_name: str, layer_name: str, recurse: bool = True):
     if not success:
         raise HTTPException(status_code=500, detail="Gagal menghapus layer di GeoServer.")
     return {"success": True, "detail": f"Layer '{layer_name}' berhasil dihapus."}
+
+@router.get("/{layer_name}")
+def get_layer_metadata(layer_name: str, workspace: Optional[str] = None):
+    layer_info = geoserver_client.get_layer(layer_name=layer_name, workspace_name=workspace)
+    if not layer_info:
+        raise HTTPException(status_code=404, detail=f"Layer '{layer_name}' tidak ditemukan di GeoServer.")
+    return layer_info

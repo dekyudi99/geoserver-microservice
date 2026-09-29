@@ -1,4 +1,4 @@
-import os
+﻿import os
 from typing import Optional
 from dotenv import load_dotenv
 
@@ -8,20 +8,23 @@ class Settings:
     PORT: int = int(os.getenv("PORT", "8001"))
     HOST: str = os.getenv("HOST", "0.0.0.0")
     DEBUG: bool = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
-    API_KEY: str = os.getenv("API_KEY", "geoserver_secret_key")
+    
+    # API Key & S2S Security
+    API_KEY: str = os.getenv("API_KEY", "rahasia_s2s_geoserver_key_2026")
+    ASTRAGIS_VERIFY_KEY_URL: str = os.getenv("ASTRAGIS_VERIFY_KEY_URL", "http://fastapi_backend:8000/api-key/verify")
 
     # GeoServer Configuration
-    GEOSERVER_URL: str = os.getenv("GEOSERVER_URL", "http://localhost:8080/geoserver").rstrip("/")
+    GEOSERVER_URL: str = os.getenv("GEOSERVER_URL", "http://geoserver:8080/geoserver").rstrip("/")
     GEOSERVER_USER: str = os.getenv("GEOSERVER_USER", "admin")
-    GEOSERVER_PASS: str = os.getenv("GEOSERVER_PASS", "geoserver")
+    GEOSERVER_PASS: str = os.getenv("GEOSERVER_PASS", "rahasia")
     GEOSERVER_WMS_URL: str = os.getenv("GEOSERVER_WMS_URL", "http://localhost:8080/geoserver").rstrip("/")
 
     # PostGIS GeoServer Spatial DB
-    POSTGIS_HOST: str = os.getenv("POSTGIS_HOST", "localhost")
+    POSTGIS_HOST: str = os.getenv("POSTGIS_HOST", "postgis_geoserver")
     POSTGIS_PORT: int = int(os.getenv("POSTGIS_PORT", "5432"))
-    POSTGIS_DB: str = os.getenv("POSTGIS_DB", "geoserver_db")
+    POSTGIS_DB: str = os.getenv("POSTGIS_DB", "geoserver_spatial_db")
     POSTGIS_USER: str = os.getenv("POSTGIS_USER", "postgres")
-    POSTGIS_PASSWORD: str = os.getenv("POSTGIS_PASSWORD", "postgres")
+    POSTGIS_PASSWORD: str = os.getenv("POSTGIS_PASSWORD", "rahasia")
     
     @property
     def DATABASE_URL(self) -> str:
