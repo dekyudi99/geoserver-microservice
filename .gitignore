@@ -7,5 +7,7 @@ venv/
 ENV/
 data_raster/
 data_vector/
+proyek-gis/
+geoserver_data/
 *.log
 .DS_Store

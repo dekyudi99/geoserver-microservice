@@ -1,37 +1,39 @@
-version: '3.8'
+﻿services:
+  geoserver:
+    image: kartoza/geoserver:2.28.2
+    container_name: geoserver_ikya
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./geoserver_data:/opt/geoserver/data_dir
+      - ./proyek-gis/data_raster:/data_raster
+      - ./proyek-gis/data_vector:/data_vector
+    networks:
+      gis_network:
+        aliases:
+          - geoserver
+          - geoserver_ikya
 
-services:
   geoserver-microservice:
     build: .
     container_name: geoserver-microservice
     restart: unless-stopped
     ports:
-      - "8001:8001"
-    environment:
-      - PORT=8001
-      - GEOSERVER_URL=http://geoserver:8080/geoserver
-      - GEOSERVER_USER=admin
-      - GEOSERVER_PASS=geoserver
-      - GEOSERVER_WMS_URL=http://localhost:8080/geoserver
-      - DATABASE_URL=postgresql://postgres:postgres@postgis:5432/geoserver_spatial_db
-      - POSTGIS_HOST=postgis
-      - POSTGIS_PORT=5432
-      - POSTGIS_DB=geoserver_spatial_db
-      - POSTGIS_USER=postgres
-      - POSTGIS_PASSWORD=postgres
-      - DATA_RASTER_PATH=/data_raster
-      - DATA_VECTOR_PATH=/data_vector
-      - SIMPLIFY_TOLERANCE=0.0001
+      - "8005:8001"
+    env_file:
+      - .env
     volumes:
-      - raster_data:/data_raster
-      - vector_data:/data_vector
+      - ./proyek-gis/data_raster:/data_raster
+      - ./proyek-gis/data_vector:/data_vector
+    depends_on:
+      - geoserver
     networks:
-      - gis-network
-
-volumes:
-  raster_data:
-  vector_data:
+      - gis_network
 
 networks:
-  gis-network:
+  gis_network:
+    name: network_gis
     external: true
