@@ -1,4 +1,20 @@
 ﻿services:
+  postgis:
+    image: postgis/postgis:15-3.3
+    container_name: postgis_geoserver
+    restart: unless-stopped
+    ports:
+      - "5434:5432"
+    env_file:
+      - .env
+    volumes:
+      - geoserver_postgis_data:/var/lib/postgresql/data
+    networks:
+      gis_network:
+        aliases:
+          - postgis_geoserver
+          - spatial_db
+
   geoserver:
     image: kartoza/geoserver:2.28.2
     container_name: geoserver_ikya
@@ -11,6 +27,8 @@
       - ./geoserver_data:/opt/geoserver/data_dir
       - ./proyek-gis/data_raster:/data_raster
       - ./proyek-gis/data_vector:/data_vector
+    depends_on:
+      - postgis
     networks:
       gis_network:
         aliases:
@@ -29,9 +47,13 @@
       - ./proyek-gis/data_raster:/data_raster
       - ./proyek-gis/data_vector:/data_vector
     depends_on:
+      - postgis
       - geoserver
     networks:
       - gis_network
+
+volumes:
+  geoserver_postgis_data:
 
 networks:
   gis_network:
