@@ -1,6 +1,7 @@
-from pathlib import Path
+﻿from pathlib import Path
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
+import logging
 import os
 import shutil
 import uuid
@@ -8,22 +9,21 @@ import json
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends
 from sqlalchemy.orm import Session
 from typing import Optional, Dict, Any
-from ..services.vector_service import vector_service
-from ..services.raster_service import raster_service
-from ..clients.geoserver_client import geoserver_client
-import logging
+from ...services.vector_service import vector_service
+from ...services.raster_service import raster_service
+from ...clients.geoserver_client import geoserver_client
+from ...config.database import get_db, engine
 from sqlalchemy import text
-from ..config.database import get_db, engine
+from ...config.settings import settings
+from ...schemas.v1.spatial_data import VectorPublishResponse, RasterPublishResponse
+from ...models.api_key import ApiKey
+from ...models.spatial_data import VectorLayer, RasterMetadata, WorkspaceMetadata
+from ...services.hash_id import encode_id, decode_id, resolve_workspace
+from ...security.auth import require_any_key
+from ...services.audit_service import log_action
+from ...models.ingest_job import IngestJob
 
-from ..config.settings import settings
-from ..schemas.spatial import VectorPublishResponse, RasterPublishResponse
-from ..models.api_key import ApiKey
-from ..models.spatial_data import VectorLayer, RasterMetadata, WorkspaceMetadata
-from ..services.hash_id import encode_id, decode_id, resolve_workspace
-from ..security.auth import require_any_key
-from ..services.audit_service import log_action
-
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("geoserver_service.v1_layer")
 
 router = APIRouter(prefix="/layers", tags=["Layers"])
 
@@ -323,20 +323,40 @@ def batch_delete_layers(
 
             if vec:
                 actual_ws = vec.workspace_name
+                # Hapus layer resource dari GeoServer
                 try:
                     geoserver_client.delete_layer(workspace_name=actual_ws, layer_name=vec.table_name, recurse=True)
                 except Exception:
                     pass
+                # Hapus FeatureType dari datastore PostGIS di GeoServer
+                try:
+                    geoserver_client.delete_feature_type(workspace_name=actual_ws, store_name="postgis_default", feature_type_name=vec.table_name, recurse=True)
+                except Exception:
+                    pass
+                # Hapus tabel PostGIS
                 try:
                     with engine.begin() as conn:
                         conn.execute(text(f'DROP TABLE IF EXISTS "{vec.table_name}" CASCADE;'))
                 except Exception:
                     pass
+                # Hapus file fisik jika ada
                 if vec.file_path and os.path.exists(vec.file_path):
                     try:
                         os.remove(vec.file_path)
                     except Exception:
                         pass
+                # Hapus staging file dari IngestJob yang terkait
+                ingest_jobs = db.query(IngestJob).filter(
+                    IngestJob.owner_id == caller.id,
+                    IngestJob.result_layer_name == vec.table_name
+                ).all()
+                for ij in ingest_jobs:
+                    if ij.staging_file_path and os.path.exists(ij.staging_file_path):
+                        try:
+                            os.remove(ij.staging_file_path)
+                        except Exception:
+                            pass
+                    db.delete(ij)
                 db.delete(vec)
                 db.commit()
                 deleted_count += 1
@@ -400,13 +420,22 @@ def delete_layer(
     db: Session = Depends(get_db),
     caller: ApiKey = Depends(require_any_key)
 ):
+    """
+    Menghapus layer secara komprehensif:
+    1. Mencari di database (VectorLayer / RasterMetadata) milik caller.
+    2. Menghapus konfigurasi di GeoServer (layer & coverage store / feature type).
+    3. Menghapus tabel di PostGIS (jika vector).
+    4. Menghapus file fisik di storage lokal.
+    5. Menghapus record baris di database PostgreSQL.
+    Toleran terhadap layer yang sudah terhapus di GeoServer (tidak melempar 500).
+    """
     ws_meta = resolve_workspace(db, workspace_name)
     actual_ws_name = ws_meta.workspace_name if ws_meta else workspace_name
 
-    # 1. Cari layer di database (Vector atau Raster) milik caller
     vec = None
     ras = None
 
+    # Cari vector layer
     vec_query = db.query(VectorLayer).filter(VectorLayer.api_key_id == caller.id)
     if layer_id:
         try:
@@ -450,25 +479,41 @@ def delete_layer(
 
     # 2. Proses penghapusan Vector
     if vec:
-        # Hapus di GeoServer
+        # Hapus layer resource dari GeoServer
         try:
             geoserver_client.delete_layer(workspace_name=actual_ws_name, layer_name=vec.table_name, recurse=recurse)
         except Exception as e:
-            logger.warning(f"GeoServer delete_layer vector error: {e}")
+            logger.warning(f"GeoServer delete_layer vector notice: {e}")
+        # Hapus FeatureType dari datastore PostGIS di GeoServer
+        try:
+            geoserver_client.delete_feature_type(workspace_name=actual_ws_name, store_name="postgis_default", feature_type_name=vec.table_name, recurse=recurse)
+        except Exception as e:
+            logger.warning(f"GeoServer delete_feature_type vector notice: {e}")
 
-        # Drop tabel di PostGIS
         try:
             with engine.begin() as conn:
                 conn.execute(text(f'DROP TABLE IF EXISTS "{vec.table_name}" CASCADE;'))
         except Exception as e:
-            logger.warning(f"PostGIS drop table error: {e}")
+            logger.warning(f"PostGIS drop table notice: {e}")
 
-        # Hapus berkas lokal jika ada
         if vec.file_path and os.path.exists(vec.file_path):
             try:
                 os.remove(vec.file_path)
             except Exception:
                 pass
+
+        # Hapus staging file dari IngestJob yang terkait
+        ingest_jobs = db.query(IngestJob).filter(
+            IngestJob.owner_id == caller.id,
+            IngestJob.result_layer_name == vec.table_name
+        ).all()
+        for ij in ingest_jobs:
+            if ij.staging_file_path and os.path.exists(ij.staging_file_path):
+                try:
+                    os.remove(ij.staging_file_path)
+                except Exception:
+                    pass
+            db.delete(ij)
 
         db.delete(vec)
         db.commit()
@@ -476,7 +521,6 @@ def delete_layer(
 
     # 3. Proses penghapusan Raster
     elif ras:
-        # GeoServer layer & coverage store (coba dengan nama store_name, layer_name, dsb)
         targets = set([ras.store_name, ras.layer_name, ras.store_name.replace("store_", "")])
         for target_lyr in targets:
             try:
@@ -486,9 +530,8 @@ def delete_layer(
         try:
             geoserver_client.delete_coverage_store(workspace_name=actual_ws_name, store_name=ras.store_name, recurse=recurse)
         except Exception as e:
-            logger.warning(f"GeoServer delete_coverage_store error: {e}")
+            logger.warning(f"GeoServer delete_coverage_store notice: {e}")
 
-        # Hapus berkas raster di disk
         if ras.file_path and os.path.exists(ras.file_path):
             try:
                 os.remove(ras.file_path)
@@ -499,12 +542,24 @@ def delete_layer(
         db.commit()
         deleted_something = True
 
-    # 4. Fallback jika tidak tercatat di DB (orphan layer GeoServer)
+    # 4. Fallback jika tidak tercatat di DB (misal orphan di GeoServer)
     if not deleted_something:
-        geoserver_client.delete_layer(workspace_name=actual_ws_name, layer_name=layer_name, recurse=recurse)
-        geoserver_client.delete_layer(workspace_name=actual_ws_name, layer_name=f"store_{layer_name}", recurse=recurse)
-        geoserver_client.delete_coverage_store(workspace_name=actual_ws_name, store_name=layer_name, recurse=recurse)
-        geoserver_client.delete_coverage_store(workspace_name=actual_ws_name, store_name=f"store_{layer_name}", recurse=recurse)
+        try:
+            geoserver_client.delete_layer(workspace_name=actual_ws_name, layer_name=layer_name, recurse=recurse)
+        except Exception:
+            pass
+        try:
+            geoserver_client.delete_layer(workspace_name=actual_ws_name, layer_name=f"store_{layer_name}", recurse=recurse)
+        except Exception:
+            pass
+        try:
+            geoserver_client.delete_coverage_store(workspace_name=actual_ws_name, store_name=layer_name, recurse=recurse)
+        except Exception:
+            pass
+        try:
+            geoserver_client.delete_coverage_store(workspace_name=actual_ws_name, store_name=f"store_{layer_name}", recurse=recurse)
+        except Exception:
+            pass
 
     log_action(
         db=db,
@@ -526,3 +581,5 @@ def get_layer_metadata(
     if not layer_info:
         raise HTTPException(status_code=404, detail=f"Layer '{layer_name}' tidak ditemukan di GeoServer.")
     return layer_info
+
+

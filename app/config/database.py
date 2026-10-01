@@ -30,3 +30,15 @@ def ensure_postgis_extension():
             logger.info("PostGIS extension ensured in spatial DB.")
     except Exception as e:
         logger.warning(f"Could not initialize PostGIS extension: {e}")
+
+def create_all_tables():
+    """Membuat semua tabel metadata & auth jika belum ada."""
+    try:
+        from ..models.api_key import ApiKey
+        from ..models.audit_log import AuditLog
+        from ..models.spatial_data import VectorLayer, RasterMetadata, WorkspaceMetadata
+        from ..models.ingest_job import IngestJob
+        Base.metadata.create_all(bind=engine)
+        logger.info("All metadata and security tables verified/created.")
+    except Exception as e:
+        logger.warning(f"Could not initialize tables: {e}")

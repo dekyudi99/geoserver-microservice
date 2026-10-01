@@ -5,12 +5,12 @@ from sqlalchemy.orm import Session
 import uuid
 import datetime
 
-from ..services.style_service import style_service
-from ..models.spatial_data import RasterMetadata, VectorLayer
-from ..models.api_key import ApiKey
-from ..security.auth import require_any_key
-from ..config.database import get_db
-from ..services.audit_service import log_action
+from ...services.style_service import style_service
+from ...models.spatial_data import RasterMetadata, VectorLayer
+from ...models.api_key import ApiKey
+from ...security.auth import require_any_key
+from ...config.database import get_db
+from ...services.audit_service import log_action
 
 router = APIRouter(prefix="/styles", tags=["Styles"])
 
@@ -159,7 +159,7 @@ def get_raster_info(
 
 @router.delete("/{style_name}")
 def delete_style(style_name: str, workspace: Optional[str] = None, recurse: bool = True):
-    from ..clients.geoserver_client import geoserver_client
+    from ...clients.geoserver_client import geoserver_client
     success = geoserver_client.delete_style(style_name=style_name, workspace_name=workspace, recurse=recurse)
     if not success:
         raise HTTPException(status_code=500, detail=f"Gagal menghapus style '{style_name}'.")

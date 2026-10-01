@@ -35,16 +35,30 @@ class GeoServerClient:
             logger.error(f"GeoServer request failed [{method} {url}]: {e}")
             raise
 
+    @staticmethod
+    def _extract_list(data: Any, parent_key: str, child_key: str) -> List[Dict[str, Any]]:
+        if not isinstance(data, dict):
+            return []
+        parent = data.get(parent_key)
+        if not isinstance(parent, dict):
+            return []
+        items = parent.get(child_key, [])
+        if isinstance(items, dict):
+            return [items]
+        if isinstance(items, list):
+            return items
+        return []
+
     # โ”€โ”€ WORKSPACE OPERATIONS โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
     def get_workspaces(self) -> List[Dict[str, Any]]:
         res = self._request("GET", "/rest/workspaces.json")
         if res.status_code == 200:
-            data = res.json()
-            workspaces = data.get("workspaces", {}).get("workspace", [])
-            if isinstance(workspaces, dict):
-                return [workspaces]
-            return workspaces
+            try:
+                return self._extract_list(res.json(), "workspaces", "workspace")
+            except Exception as e:
+                logger.warning(f"Error parsing workspaces json: {e}")
+                return []
         return []
 
     def get_workspace(self, workspace_name: str) -> Optional[Dict[str, Any]]:
@@ -78,9 +92,11 @@ class GeoServerClient:
         path = f"/rest/workspaces/{workspace_name}/datastores.json" if workspace_name else "/rest/datastores.json"
         res = self._request("GET", path)
         if res.status_code == 200:
-            data = res.json()
-            stores = data.get("dataStores", {}).get("dataStore", [])
-            return [stores] if isinstance(stores, dict) else stores
+            try:
+                return self._extract_list(res.json(), "dataStores", "dataStore")
+            except Exception as e:
+                logger.warning(f"Error parsing datastores json: {e}")
+                return []
         return []
 
     def get_datastore(self, workspace_name: str, store_name: str) -> Optional[Dict[str, Any]]:
@@ -120,8 +136,6 @@ class GeoServerClient:
     <passwd>{pwd}</passwd>
     <dbtype>postgis</dbtype>
     <schema>{schema}</schema>
-    <Expose primary keys>true</Expose>
-    <Estimated extends>true</Estimated>
   </connectionParameters>
 </dataStore>"""
         res = self._request(
@@ -138,9 +152,11 @@ class GeoServerClient:
         path = f"/rest/workspaces/{workspace_name}/coveragestores.json" if workspace_name else "/rest/coveragestores.json"
         res = self._request("GET", path)
         if res.status_code == 200:
-            data = res.json()
-            stores = data.get("coverageStores", {}).get("coverageStore", [])
-            return [stores] if isinstance(stores, dict) else stores
+            try:
+                return self._extract_list(res.json(), "coverageStores", "coverageStore")
+            except Exception as e:
+                logger.warning(f"Error parsing coveragestores json: {e}")
+                return []
         return []
 
     def get_coverage_store(self, workspace_name: str, store_name: str) -> Optional[Dict[str, Any]]:
@@ -151,13 +167,14 @@ class GeoServerClient:
 
     def create_coverage_store(self, workspace_name: str, store_name: str, file_path: str) -> bool:
         """Membuat coverage store GeoTIFF dan mempublikasikannya."""
-        # GeoServer endpoint format untuk file lokal
+        # GeoServer REST external.geotiff expects absolute filesystem path in body
+        clean_path = file_path.replace("file://", "").replace("file:", "")
         url = f"/rest/workspaces/{workspace_name}/coveragestores/{store_name}/external.geotiff?configure=first&coverageName={store_name}"
         res = self._request(
             "PUT",
             url,
             headers={"Content-Type": "text/plain"},
-            data=f"file://{file_path}"
+            data=clean_path
         )
         return res.status_code in (200, 201)
 
@@ -199,6 +216,14 @@ class GeoServerClient:
         res = self._request(
             "DELETE",
             f"/rest/workspaces/{workspace_name}/layers/{layer_name}?recurse={str(recurse).lower()}"
+        )
+        return res.status_code in (200, 204)
+
+    def delete_feature_type(self, workspace_name: str, store_name: str, feature_type_name: str, recurse: bool = True) -> bool:
+        """Menghapus FeatureType dari DataStore GeoServer (vector layer resource)."""
+        res = self._request(
+            "DELETE",
+            f"/rest/workspaces/{workspace_name}/datastores/{store_name}/featuretypes/{feature_type_name}?recurse={str(recurse).lower()}"
         )
         return res.status_code in (200, 204)
 
@@ -291,6 +316,53 @@ class GeoServerClient:
         if res.status_code == 200:
             return res.json()
         return {"status": "available"}
+
+    def create_or_update_layer_group(
+        self,
+        workspace_name: str,
+        group_name: str,
+        title: str,
+        mode: str,
+        layer_names: list
+    ) -> bool:
+        """Membuat atau memperbarui layer group di GeoServer."""
+        clean_name = group_name.replace(" ", "_")
+        check_res = self._request("GET", f"/rest/workspaces/{workspace_name}/layergroups/{clean_name}.json")
+        exists = check_res.status_code == 200
+
+        payload = {
+            "layerGroup": {
+                "name": clean_name,
+                "mode": mode.upper() if mode else "SINGLE",
+                "title": title or clean_name,
+                "publishables": {
+                    "published": [{"@type": "layer", "name": str(l)} for l in layer_names]
+                }
+            }
+        }
+
+        if exists:
+            res = self._request(
+                "PUT",
+                f"/rest/workspaces/{workspace_name}/layergroups/{clean_name}",
+                json=payload
+            )
+        else:
+            res = self._request(
+                "POST",
+                f"/rest/workspaces/{workspace_name}/layergroups",
+                json=payload
+            )
+        return res.status_code in (200, 201)
+
+    def delete_layer_group(self, workspace_name: str, group_name: str) -> bool:
+        """Menghapus layer group dari GeoServer."""
+        clean_name = group_name.replace(" ", "_")
+        res = self._request(
+            "DELETE",
+            f"/rest/workspaces/{workspace_name}/layergroups/{clean_name}"
+        )
+        return res.status_code in (200, 204)
 
 geoserver_client = GeoServerClient()
 

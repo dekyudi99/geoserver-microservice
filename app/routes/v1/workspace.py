@@ -3,13 +3,13 @@ import uuid
 from typing import List, Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 from sqlalchemy.orm import Session
-from ..clients.geoserver_client import geoserver_client
-from ..schemas.spatial import WorkspaceCreateRequest
-from ..config.database import get_db
-from ..security.auth import get_verified_key
-from ..models.spatial_data import WorkspaceMetadata
-from ..models.api_key import ApiKeyType
-from ..services.hash_id import encode_id, decode_id, resolve_workspace
+from ...clients.geoserver_client import geoserver_client
+from ...schemas.v1.spatial_data import WorkspaceCreateRequest
+from ...config.database import get_db
+from ...security.auth import get_verified_key
+from ...models.spatial_data import WorkspaceMetadata
+from ...models.api_key import ApiKeyType
+from ...services.hash_id import encode_id, decode_id, resolve_workspace
 
 router = APIRouter(prefix="/workspaces", tags=["Workspaces"])
 

@@ -1,7 +1,7 @@
 import time
 from fastapi import APIRouter
-from ..config.settings import settings
-from ..clients.geoserver_client import geoserver_client
+from ...config.settings import settings
+from ...clients.geoserver_client import geoserver_client
 
 router = APIRouter(tags=["Health"])
 
