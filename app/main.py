@@ -29,6 +29,7 @@ origins = [
     "http://localhost:8001",
     "http://localhost:8005",
     "https://astragis.ikya.my.id",
+    "https://api-astragis.ikya.my.id",
     "https://flowgis.ikya.my.id",
 ]
 
