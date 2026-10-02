@@ -6,7 +6,6 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from app.config.settings import settings
 from app.config.database import ensure_postgis_extension, create_all_tables
 from app.routes.v1 import api_v1_router
-from app.routes.legacy import legacy_router
 import logging
 
 logging.basicConfig(level=logging.INFO if not settings.DEBUG else logging.DEBUG)
@@ -40,24 +39,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Deprecation", "Sunset", "Link"]
 )
-
-@app.middleware("http")
-async def deprecation_middleware(request: Request, call_next):
-    response = await call_next(request)
-    path = request.url.path
-    if (
-        not path.startswith("/api/v1")
-        and not path.startswith("/docs")
-        and not path.startswith("/openapi.json")
-        and not path.startswith("/redoc")
-        and not path.startswith("/favicon.ico")
-    ):
-        response.headers["Deprecation"] = "@true"
-        response.headers["Sunset"] = "Sat, 31 Oct 2026 23:59:59 GMT"
-        response.headers["Link"] = f'</api/v1{path}>; rel="successor-version"'
-    return response
 
 
 @app.on_event("startup")
@@ -81,16 +63,13 @@ def startup_event():
 # 1. Mount official V1 API Router
 app.include_router(api_v1_router)
 
-# 2. Mount Legacy Router (for backward compatibility during migration)
-app.include_router(legacy_router)
-
-# 3. Dedicated Swagger UI & OpenAPI Schema for v1
+# 2. Dedicated Swagger UI and OpenAPI Schema for v1
 @app.get("/api/v1/openapi.json", include_in_schema=False)
 def get_v1_openapi():
     full_schema = get_openapi(
         title="GeoServer Microservice API - v1",
         version="1.0.0",
-        description="Spesifikasi resmi API v1 untuk GeoServer Microservice & Spatial Data Management",
+        description="Spesifikasi resmi API v1 untuk GeoServer Microservice dan Spatial Data Management",
         routes=app.routes
     )
     v1_paths = {p: item for p, item in full_schema.get("paths", {}).items() if p.startswith("/api/v1")}
@@ -103,8 +82,6 @@ def get_v1_docs():
         openapi_url="/api/v1/openapi.json",
         title="GeoServer Microservice API v1 Documentation"
     )
-
-print("Main structure verified!")
 
 
 if __name__ == "__main__":

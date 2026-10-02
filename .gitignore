@@ -11,3 +11,5 @@ proyek-gis/
 geoserver_data/
 *.log
 .DS_Store
+
+docker-compose.yml

@@ -8,9 +8,6 @@ class Settings:
     HOST: str = os.getenv("HOST", "0.0.0.0")
     DEBUG: bool = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 
-    # API Key & S2S Security
-    API_KEY: str = os.getenv("API_KEY", "")
-    ASTRAGIS_VERIFY_KEY_URL: str = os.getenv("ASTRAGIS_VERIFY_KEY_URL", "")
 
     # GeoServer Configuration
     GEOSERVER_URL: str = os.getenv("GEOSERVER_URL", "http://geoserver:8080/geoserver").rstrip("/")

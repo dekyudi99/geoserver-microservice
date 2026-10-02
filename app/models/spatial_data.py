@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Integer, Text, DateTime, JSON
+from sqlalchemy import Column, String, Integer, Text, DateTime, JSON, Sequence, FetchedValue
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from ..config.database import Base
@@ -53,7 +53,7 @@ class WorkspaceMetadata(Base):
     __tablename__ = "workspace_metadata"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    raw_id = Column(Integer, autoincrement=True)
+    raw_id = Column(Integer, Sequence('workspace_metadata_raw_id_seq'), server_default=FetchedValue())
     api_key_id = Column(UUID(as_uuid=True), nullable=True)
     workspace_name = Column(String(100), nullable=False, unique=True, index=True)
     display_name = Column(String(200), nullable=False)

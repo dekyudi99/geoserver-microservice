@@ -14,18 +14,6 @@
         aliases:
           - postgis_geoserver
           - spatial_db
-  
-  pgadmin:
-    image: dpage/pgadmin4:8.5
-    container_name: pgadmin_geoserver
-    ports:
-      - "8600:80"
-    environment:
-      - PGADMIN_DEFAULT_EMAIL=admin@gis.com
-      - PGADMIN_DEFAULT_PASSWORD=rahasia
-    networks:
-      - gis_network
-    restart: unless-stopped
 
   geoserver:
     image: kartoza/geoserver:2.28.2

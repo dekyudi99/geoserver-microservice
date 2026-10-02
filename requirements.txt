@@ -19,3 +19,4 @@ pyproj>=3.6.0
 fiona>=1.9.0
 bcrypt
 sqlalchemy
+sqids

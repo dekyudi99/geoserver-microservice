@@ -84,7 +84,7 @@ class GeoServerClient:
             "DELETE",
             f"/rest/workspaces/{workspace_name}?recurse={str(recurse).lower()}"
         )
-        return res.status_code in (200, 204)
+        return res.status_code in (200, 204, 404)
 
     # โ”€โ”€ DATASTORE OPERATIONS (VECTOR) โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
@@ -183,7 +183,7 @@ class GeoServerClient:
             "DELETE",
             f"/rest/workspaces/{workspace_name}/coveragestores/{store_name}?recurse={str(recurse).lower()}"
         )
-        return res.status_code in (200, 204)
+        return res.status_code in (200, 204, 404)
 
     # โ”€โ”€ FEATURE TYPES & PUBLISH โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
@@ -217,7 +217,7 @@ class GeoServerClient:
             "DELETE",
             f"/rest/workspaces/{workspace_name}/layers/{layer_name}?recurse={str(recurse).lower()}"
         )
-        return res.status_code in (200, 204)
+        return res.status_code in (200, 204, 404)
 
     def delete_feature_type(self, workspace_name: str, store_name: str, feature_type_name: str, recurse: bool = True) -> bool:
         """Menghapus FeatureType dari DataStore GeoServer (vector layer resource)."""
@@ -225,7 +225,7 @@ class GeoServerClient:
             "DELETE",
             f"/rest/workspaces/{workspace_name}/datastores/{store_name}/featuretypes/{feature_type_name}?recurse={str(recurse).lower()}"
         )
-        return res.status_code in (200, 204)
+        return res.status_code in (200, 204, 404)
 
     # โ”€โ”€ STYLES & SLD โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
@@ -293,7 +293,7 @@ class GeoServerClient:
         else:
             path = f"rest/styles/{style_name}?recurse={str(recurse).lower()}"
         res = self._request("DELETE", path)
-        return res.status_code in (200, 204)
+        return res.status_code in (200, 204, 404)
 
     def get_layer(self, layer_name: str, workspace_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
         if workspace_name:
@@ -362,7 +362,7 @@ class GeoServerClient:
             "DELETE",
             f"/rest/workspaces/{workspace_name}/layergroups/{clean_name}"
         )
-        return res.status_code in (200, 204)
+        return res.status_code in (200, 204, 404)
 
 geoserver_client = GeoServerClient()
 
