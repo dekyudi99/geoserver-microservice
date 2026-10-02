@@ -16,7 +16,7 @@ from ...config.database import get_db, engine
 from sqlalchemy import text
 from ...config.settings import settings
 from ...schemas.v1.spatial_data import VectorPublishResponse, RasterPublishResponse
-from ...models.api_key import ApiKey
+from ...models.api_key import ApiKey, ApiKeyType
 from ...models.spatial_data import VectorLayer, RasterMetadata, WorkspaceMetadata
 from ...services.hash_id import encode_id, decode_id, resolve_workspace
 from ...security.auth import require_any_key
@@ -58,6 +58,13 @@ async def publish_vector(
 
         ws_meta = resolve_workspace(db, workspace_name)
         actual_ws_name = ws_meta.workspace_name if ws_meta else workspace_name
+
+        is_primary = getattr(caller, "key_type", None) == ApiKeyType.PRIMARY
+        if not is_primary and ws_meta and ws_meta.api_key_id != caller.id:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Anda tidak memiliki izin mengunggah layer ke workspace '{actual_ws_name}'."
+            )
 
         # 3. Publish to PostGIS and GeoServer
         res = vector_service.publish_vector_to_geoserver(
@@ -143,9 +150,19 @@ async def publish_raster(
 
         parsed_style = json.loads(style_config) if style_config else None
 
+        ws_meta = resolve_workspace(db, workspace_name)
+        actual_ws_name = ws_meta.workspace_name if ws_meta else workspace_name
+
+        is_primary = getattr(caller, "key_type", None) == ApiKeyType.PRIMARY
+        if not is_primary and ws_meta and ws_meta.api_key_id != caller.id:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Anda tidak memiliki izin mengunggah layer ke workspace '{actual_ws_name}'."
+            )
+
         res = raster_service.publish_raster_to_geoserver(
             file_path=saved_path,
-            workspace_name=workspace_name,
+            workspace_name=actual_ws_name,
             store_name=final_store_name,
             title=layer_name,
             style_config=parsed_style
@@ -153,7 +170,7 @@ async def publish_raster(
 
         raster_meta = RasterMetadata(
             api_key_id=caller.id,
-            workspace_name=workspace_name,
+            workspace_name=actual_ws_name,
             store_name=final_store_name,
             layer_name=layer_name,
             epsg=res.get("epsg"),

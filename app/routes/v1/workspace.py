@@ -29,87 +29,45 @@ def slugify_name(name: str) -> str:
 
 @router.get("", response_model=List[Dict[str, Any]])
 def list_workspaces(
+    all: bool = Query(False, description="Tampilkan semua workspace jika pemanggil adalah admin/primary"),
     db: Session = Depends(get_db),
     key = Depends(get_verified_key)
 ):
     """
-    Mengambil seluruh workspace dari GeoServer yang diperkaya dengan hashed ID dan display_name.
-    Memisahkan batasan hak akses: Primary Key (Admin) melihat semua workspace,
-    sedangkan Standard Key hanya melihat workspace miliknya sendiri atau yang bersifat public.
+    Mengambil seluruh workspace dari GeoServer yang sesuai dengan API Key pengguna (api_key_id == key.id).
+    Primary Key (Admin) hanya melihat semua workspace jika query param all=True.
     """
     raw_workspaces = geoserver_client.get_workspaces()
     is_primary = getattr(key, "key_type", None) == ApiKeyType.PRIMARY
 
-    if is_primary:
-        meta_rows = db.query(WorkspaceMetadata).all()
+    if is_primary and all:
+        meta_rows = db.query(WorkspaceMetadata).order_by(WorkspaceMetadata.created_at.desc()).all()
     else:
         meta_rows = db.query(WorkspaceMetadata).filter(
-            (WorkspaceMetadata.api_key_id == key.id) | (WorkspaceMetadata.visibility == "public")
-        ).all()
+            WorkspaceMetadata.api_key_id == key.id
+        ).order_by(WorkspaceMetadata.created_at.desc()).all()
 
-    meta_map = {m.workspace_name: m for m in meta_rows}
-
-    # Self-healing: jika ada workspace di GeoServer yang belum tercatat di WorkspaceMetadata (misal ws_sfdf_4eec90),
-    # buatkan metadata otomatis agar konsisten di DB dan pgAdmin.
-    need_commit = False
-    for ws in raw_workspaces:
-        ws_name = ws.get("name")
-        if not ws_name:
-            continue
-        if ws_name not in meta_map:
-            derived_display = ws_name
-            if ws_name.startswith("ws_"):
-                parts = ws_name[3:].rsplit("_", 1)
-                derived_display = parts[0] if len(parts) > 1 and len(parts[1]) == 6 else ws_name[3:]
-                derived_display = derived_display.replace("_", " ").title()
-
-            new_meta = WorkspaceMetadata(
-                id=uuid.uuid4(),
-                api_key_id=getattr(key, "id", None),
-                workspace_name=ws_name,
-                display_name=derived_display or ws_name,
-                visibility="private"
-            )
-            db.add(new_meta)
-            meta_map[ws_name] = new_meta
-            need_commit = True
-
-    if need_commit:
-        try:
-            db.commit()
-            for m in meta_map.values():
-                if m.raw_id is None:
-                    try:
-                        db.refresh(m)
-                    except Exception:
-                        pass
-        except Exception as e:
-            db.rollback()
-            logger.warning(f"Self-heal workspace metadata commit warning: {e}")
+    geoserver_names = {ws.get("name"): ws for ws in raw_workspaces if ws.get("name")}
 
     results = []
-    for ws in raw_workspaces:
-        ws_name = ws.get("name")
-        if not ws_name:
-            continue
-        if not is_primary and ws_name not in meta_map:
-            continue
-
-        meta = meta_map.get(ws_name)
-        hashed_id = encode_id(meta.raw_id) if meta and meta.raw_id is not None else ws_name
+    for meta in meta_rows:
+        ws_name = meta.workspace_name
+        ws_geo = geoserver_names.get(ws_name)
+        hashed_id = encode_id(meta.raw_id) if meta.raw_id is not None else ws_name
 
         results.append({
             "id": hashed_id,
             "hashed_id": hashed_id,
-            "raw_id": meta.raw_id if meta else None,
+            "raw_id": meta.raw_id,
             "workspace_name": ws_name,
             "ws_name": ws_name,
-            "name": meta.display_name if meta else ws_name,
-            "display_name": meta.display_name if meta else ws_name,
-            "visibility": meta.visibility if meta else "private",
-            "created_at": meta.created_at.isoformat() if meta and meta.created_at else None,
-            "href": ws.get("href")
+            "name": meta.display_name or ws_name,
+            "display_name": meta.display_name or ws_name,
+            "visibility": meta.visibility or "private",
+            "created_at": meta.created_at.isoformat() if meta.created_at else None,
+            "href": ws_geo.get("href") if ws_geo else None
         })
+
     return results
 
 @router.get("/{identifier}")
@@ -120,6 +78,10 @@ def get_workspace(
 ):
     meta = resolve_workspace(db, identifier)
     ws_name = meta.workspace_name if meta else identifier
+
+    is_primary = getattr(key, "key_type", None) == ApiKeyType.PRIMARY
+    if meta and not is_primary and meta.api_key_id != key.id:
+        raise HTTPException(status_code=403, detail="Anda tidak memiliki akses ke workspace ini.")
 
     ws = geoserver_client.get_workspace(ws_name)
     if not ws:
@@ -216,6 +178,10 @@ def delete_workspace(
     """
     meta = resolve_workspace(db, identifier)
     ws_name = meta.workspace_name if meta else identifier
+
+    is_primary = getattr(key, "key_type", None) == ApiKeyType.PRIMARY
+    if meta and not is_primary and meta.api_key_id != key.id:
+        raise HTTPException(status_code=403, detail="Anda tidak memiliki izin untuk menghapus workspace ini.")
 
     # 1. Hapus dari GeoServer (recurse=True menghapus semua datastore dan coverage store di GeoServer)
     try:

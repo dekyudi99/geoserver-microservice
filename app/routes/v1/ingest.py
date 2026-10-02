@@ -50,6 +50,13 @@ def upload_and_ingest(
     ws_meta = resolve_workspace(db, workspace_name)
     actual_ws_name = ws_meta.workspace_name if ws_meta else workspace_name
 
+    is_primary = getattr(caller, "key_type", None) == ApiKeyType.PRIMARY
+    if not is_primary and ws_meta and ws_meta.api_key_id != caller.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Anda tidak memiliki izin mengunggah layer ke workspace '{actual_ws_name}'."
+        )
+
     job_id = uuid.uuid4()
     job_staging_dir = Path(settings.INGEST_STAGING_DIR) / f"job_{job_id}"
 
@@ -126,6 +133,14 @@ def batch_upload_and_ingest(
     target_ws = workspace_name or "astragis"
     ws_meta = resolve_workspace(db, target_ws)
     actual_ws_name = ws_meta.workspace_name if ws_meta else target_ws
+
+    is_primary = getattr(caller, "key_type", None) == ApiKeyType.PRIMARY
+    if not is_primary and ws_meta and ws_meta.api_key_id != caller.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Anda tidak memiliki izin mengunggah layer ke workspace '{actual_ws_name}'."
+        )
+
     created_by_val = getattr(caller, "name", None) or getattr(caller, "owner_info", None)
 
     runner = BackgroundTasksRunner(background_tasks)
