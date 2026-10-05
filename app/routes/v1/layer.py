@@ -253,6 +253,7 @@ def get_my_layers(
             result.append({
                 "id": str(v.id),
                 "type": "vector",
+                "layer_type": "vector",
                 "data_type": v_fmt,
                 "file_format": v_fmt,
                 "workspace_name": v.workspace_name,
@@ -266,6 +267,9 @@ def get_my_layers(
                 "srid": v.srid or 4326,
                 "epsg": v.srid or 4326,
                 "wms_url": v.wms_url,
+                "wms_layers_param": f"{v.workspace_name}:{v.table_name}",
+                "symbology": None,
+                "style_name": None,
                 "created_at": str(v.created_at)
             })
     if layer_type != "vector":
@@ -275,6 +279,7 @@ def get_my_layers(
             result.append({
                 "id": str(r.id),
                 "type": "raster",
+                "layer_type": "raster",
                 "data_type": r_fmt,
                 "file_format": r_fmt,
                 "workspace_name": r.workspace_name,
@@ -286,6 +291,9 @@ def get_my_layers(
                 "dimensions": r.dimensions,
                 "epsg": r.epsg or 4326,
                 "wms_url": r.wms_url,
+                "wms_layers_param": f"{r.workspace_name}:{r.store_name}",
+                "symbology": r.symbology,
+                "style_name": r.symbology.get("style_name") if isinstance(r.symbology, dict) else None,
                 "created_at": str(r.created_at)
             })
     # Enrich with Workspace Metadata (Hashed ID and Display Name)

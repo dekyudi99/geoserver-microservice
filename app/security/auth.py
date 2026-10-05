@@ -46,9 +46,9 @@ def get_verified_key(
 ) -> SimpleNamespace:
     """
     Self-contained API Key Verification:
-    - Tidak lagi delegasi ke service eksternal
+    - Memvalidasi API key secara mandiri di GeoServer Microservice
     - Memverifikasi kunci terhadap PostGIS geoserver_spatial_db
-    - Membedakan peran PRIMARY (AstraGIS/Admin) dan STANDARD (Client/External)
+    - Membedakan peran PRIMARY (service/admin) dan STANDARD (client)
     - Mengembalikan objek SimpleNamespace yang bebas dari DetachedInstanceError
     """
     token = x_api_key or (auth_bearer.credentials if auth_bearer else None) or api_key_query
