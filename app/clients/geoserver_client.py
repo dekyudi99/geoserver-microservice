@@ -1,6 +1,8 @@
-﻿import os
+import os
 import requests
+from requests.adapters import HTTPAdapter
 from requests.auth import HTTPBasicAuth
+from urllib3.util.retry import Retry
 from typing import Dict, Any, List, Optional
 import xmltodict
 import logging
@@ -21,6 +23,13 @@ class GeoServerClient:
         self.auth = HTTPBasicAuth(self.user, self.password)
         self.session = requests.Session()
         self.session.auth = self.auth
+        adapter = HTTPAdapter(
+            pool_connections=10,
+            pool_maxsize=20,
+            max_retries=Retry(total=2, backoff_factor=0.3, allowed_methods=frozenset(["GET"]), status_forcelist=(502, 503, 504)),
+        )
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}/{path.lstrip('/')}"
@@ -129,13 +138,19 @@ class GeoServerClient:
         xml_payload = f"""<dataStore>
   <name>{store_name}</name>
   <connectionParameters>
-    <host>{h}</host>
-    <port>{p}</port>
-    <database>{d}</database>
-    <user>{u}</user>
-    <passwd>{pwd}</passwd>
-    <dbtype>postgis</dbtype>
-    <schema>{schema}</schema>
+    <entry key="host">{h}</entry>
+    <entry key="port">{p}</entry>
+    <entry key="database">{d}</entry>
+    <entry key="user">{u}</entry>
+    <entry key="passwd">{pwd}</entry>
+    <entry key="dbtype">postgis</entry>
+    <entry key="schema">{schema}</entry>
+    <entry key="Estimated extents">true</entry>
+    <entry key="Loose bbox">true</entry>
+    <entry key="preparedStatements">true</entry>
+    <entry key="fetch size">1000</entry>
+    <entry key="min connections">2</entry>
+    <entry key="max connections">20</entry>
   </connectionParameters>
 </dataStore>"""
         res = self._request(
@@ -193,16 +208,26 @@ class GeoServerClient:
         store_name: str,
         table_name: str,
         title: Optional[str] = None,
-        srid: int = 4326
+        srid: int = 4326,
+        bbox: Optional[List[float]] = None
     ) -> bool:
-        """Mempublikasikan tabel PostGIS sebagai FeatureType Layer di GeoServer."""
+        """Mempublikasikan tabel PostGIS sebagai FeatureType Layer di GeoServer.
+
+        bbox ([minx, miny, maxx, maxy], sama dengan srid) opsional; bila diberikan,
+        GeoServer tidak perlu menghitung extent sendiri.
+        """
+        bbox_xml = ""
+        if bbox:
+            minx, miny, maxx, maxy = bbox
+            box = f"<minx>{minx}</minx><maxx>{maxx}</maxx><miny>{miny}</miny><maxy>{maxy}</maxy><crs>EPSG:{srid}</crs>"
+            bbox_xml = f"\n  <nativeBoundingBox>{box}</nativeBoundingBox>\n  <latLonBoundingBox>{box}</latLonBoundingBox>"
         xml_payload = f"""<featureType>
   <name>{table_name}</name>
   <nativeName>{table_name}</nativeName>
   <title>{title or table_name}</title>
   <srs>EPSG:{srid}</srs>
   <nativeCRS>EPSG:{srid}</nativeCRS>
-  <enabled>true</enabled>
+  <enabled>true</enabled>{bbox_xml}
 </featureType>"""
         res = self._request(
             "POST",

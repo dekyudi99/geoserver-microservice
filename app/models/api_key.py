@@ -1,15 +1,15 @@
 import uuid
 from sqlalchemy import Column, String, Boolean, Text, Enum as SAEnum, DateTime
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.sql import func
 from ..config.database import Base
+from .mixins import TimestampMixin
 import enum
 
 class ApiKeyType(str, enum.Enum):
     PRIMARY = "PRIMARY"     # Bisa semua hal: buat key, hapus key, lihat logs, semua fitur GeoServer
     STANDARD = "STANDARD"   # Hanya akses fitur GeoServer, tidak bisa manage key lain
 
-class ApiKey(Base):
+class ApiKey(TimestampMixin, Base):
     __tablename__ = "api_keys"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -19,5 +19,4 @@ class ApiKey(Base):
     key_type = Column(SAEnum(ApiKeyType), nullable=False)           # PRIMARY atau STANDARD
     owner_info = Column(Text, nullable=True)                        # JSON string: info pemilik (opsional)
     is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_used_at = Column(DateTime(timezone=True), nullable=True)

@@ -3,8 +3,9 @@ from sqlalchemy import Column, String, Text, DateTime
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from ..config.database import Base
+from .mixins import TimestampMixin
 
-class AuditLog(Base):
+class AuditLog(TimestampMixin, Base):
     __tablename__ = "audit_logs"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

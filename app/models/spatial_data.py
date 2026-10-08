@@ -1,10 +1,10 @@
 import uuid
-from sqlalchemy import Column, String, Integer, Text, DateTime, JSON, Sequence, FetchedValue
+from sqlalchemy import Column, String, Integer, Text, JSON, Sequence, FetchedValue
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.sql import func
 from ..config.database import Base
+from .mixins import TimestampMixin
 
-class VectorLayer(Base):
+class VectorLayer(TimestampMixin, Base):
     """
     Metadata vector layer yang dipublish ke GeoServer PostGIS.
     api_key_id = ownership boundary.
@@ -21,10 +21,11 @@ class VectorLayer(Base):
     bbox = Column(JSON, nullable=True)
     srid = Column(Integer, nullable=True)
     file_path = Column(Text, nullable=True)
+    file_format = Column(String(20), nullable=True)  # geojson, shp, kml, kmz, csv
     wms_url = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    symbology = Column(JSON, nullable=True)
 
-class RasterMetadata(Base):
+class RasterMetadata(TimestampMixin, Base):
     """
     Metadata raster yang dipublish ke GeoServer.
     api_key_id = ownership boundary.
@@ -42,10 +43,9 @@ class RasterMetadata(Base):
     file_path = Column(Text, nullable=True)
     wms_url = Column(Text, nullable=True)
     symbology = Column(JSON, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
-class WorkspaceMetadata(Base):
+class WorkspaceMetadata(TimestampMixin, Base):
     """
     Metadata workspace untuk memetakan GeoServer workspace_name
     ke nama ramah pengguna (display_name), kepemilikan api_key, dan visibilitas.
@@ -58,10 +58,9 @@ class WorkspaceMetadata(Base):
     workspace_name = Column(String(100), nullable=False, unique=True, index=True)
     display_name = Column(String(200), nullable=False)
     visibility = Column(String(50), default="private")
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
-class LayerGroupMetadata(Base):
+class LayerGroupMetadata(TimestampMixin, Base):
     """
     Metadata layer group GeoServer yang dimiliki oleh API Key tertentu.
     """
@@ -78,4 +77,3 @@ class LayerGroupMetadata(Base):
     wms_url = Column(Text, nullable=True)
     wms_layers_param = Column(Text, nullable=True)
     bbox = Column(JSON, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())

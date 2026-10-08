@@ -3,8 +3,8 @@ import uuid
 import enum
 from sqlalchemy import Column, String, Integer, Text, DateTime, ForeignKey, Enum
 from sqlalchemy.dialects.postgresql import UUID, JSON
-from sqlalchemy.sql import func
 from ..config.database import Base
+from .mixins import TimestampMixin
 
 class IngestSourceEnum(str, enum.Enum):
     LOCAL_UPLOAD = "LOCAL_UPLOAD"
@@ -18,7 +18,7 @@ class IngestStatusEnum(str, enum.Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
-class IngestJob(Base):
+class IngestJob(TimestampMixin, Base):
     __tablename__ = "ingest_jobs"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -34,6 +34,5 @@ class IngestJob(Base):
     result_layer_name = Column(String(150), nullable=True)
     result_metadata = Column(JSON, nullable=True)
     error_message = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=func.now(), nullable=False)
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)

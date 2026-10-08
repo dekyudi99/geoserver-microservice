@@ -3,12 +3,14 @@ import shutil
 import zipfile
 import re
 import uuid
+import tempfile
 import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 import rasterio
+from rasterio.shutil import copy as rio_copy
 import geopandas as gpd
 from shapely.geometry import MultiPolygon, MultiLineString, MultiPoint, Polygon, LineString, Point
 
@@ -18,6 +20,7 @@ from app.clients.geoserver_client import geoserver_client
 from app.models.ingest_job import IngestJob
 from app.models.spatial_data import VectorLayer, RasterMetadata
 from app.services.hash_id import resolve_workspace
+from app.services.style_service import style_service
 
 logger = logging.getLogger("geoserver_service.ingest_processor")
 
@@ -36,6 +39,14 @@ def force_multi_geometry(geom):
     elif isinstance(geom, Point):
         return MultiPoint([geom])
     return geom
+
+def _write_cog(src_path: Path, dest_path: Path) -> None:
+    """Tulis GeoTIFF sebagai Cloud Optimized GeoTIFF (tiled + overview) agar tile cepat dirender GeoServer."""
+    try:
+        rio_copy(src_path, dest_path, driver="COG", compress="DEFLATE", blocksize=512, overview_resampling="average")
+    except Exception as cog_err:
+        logger.warning(f"Konversi COG gagal, menyalin berkas apa adanya: {cog_err}")
+        shutil.copy2(src_path, dest_path)
 
 class IngestProcessor:
     @staticmethod
@@ -121,7 +132,7 @@ class IngestProcessor:
         dest_filename = f"{geoserver_name}.tif"
         os.makedirs(settings.DATA_RASTER_PATH, exist_ok=True)
         dest_file = Path(settings.DATA_RASTER_PATH) / dest_filename
-        shutil.copy2(path, dest_file)
+        _write_cog(path, dest_file)
 
         # 3. Publish ke GeoServer CoverageStore
         store_name = f"store_{geoserver_name}"
@@ -208,15 +219,7 @@ class IngestProcessor:
         display_name: Optional[str] = None
     ) -> Dict[str, Any]:
         target_display_name = display_name or job.layer_name
-        owner_prefix = str(job.owner_id).replace("-", "")[:8]
-        clean_slug = slugify_layer_name(target_display_name)
         unique_suffix = uuid.uuid4().hex[:6]
-        # geoserver_name: nama teknis unik di PostGIS & GeoServer
-        geoserver_name = f"vec_{owner_prefix}_{clean_slug}_{unique_suffix}"
-
-        logger.info(f"Processing Vector ZIP Job {job.id} for '{target_display_name}' -> geoserver_name='{geoserver_name}'")
-        job.progress = min(job.progress + 15, 85)
-        db.commit()
 
         extract_dir = path.parent / f"extracted_{job.id}_{unique_suffix}"
         extract_dir.mkdir(parents=True, exist_ok=True)
@@ -263,97 +266,14 @@ class IngestProcessor:
             if gdf.crs is None:
                 raise ValueError("Berkas .prj tidak dapat dibaca atau CRS tidak valid.")
 
-            native_srid = gdf.crs.to_epsg() or 4326
-
-            # 4. Standardisasi Geometri & Kolom
-            if native_srid != 4326:
-                gdf = gdf.to_crs(epsg=4326)
-
-            gdf["geometry"] = gdf["geometry"].make_valid()
-            gdf["geometry"] = gdf["geometry"].apply(force_multi_geometry)
-
-            new_cols = {}
-            for col in gdf.columns:
-                if col != "geometry":
-                    clean_col = re.sub(r"[^a-zA-Z0-9_]", "_", col.lower().strip()).strip("_")
-                    if clean_col in ("table", "user", "order", "group", "select", "from", "where"):
-                        clean_col = f"col_{clean_col}"
-                    new_cols[col] = clean_col[:50]
-            gdf.rename(columns=new_cols, inplace=True)
-
-            # 5. Staging PostGIS & Atomic Table Swap
-            staging_table_name = f"staging_{uuid.uuid4().hex[:10]}"
-
-            try:
-                gdf.to_postgis(name=staging_table_name, con=engine, if_exists="replace", index=False)
-
-                with engine.begin() as conn:
-                    conn.execute(text(f"""
-                        DROP TABLE IF EXISTS {geoserver_name} CASCADE;
-                        ALTER TABLE {staging_table_name} RENAME TO {geoserver_name};
-                        CREATE INDEX idx_{geoserver_name}_geom ON {geoserver_name} USING GIST (geometry);
-                    """))
-            except Exception as db_err:
-                try:
-                    with engine.begin() as conn:
-                        conn.execute(text(f"DROP TABLE IF EXISTS {staging_table_name} CASCADE;"))
-                except Exception:
-                    pass
-                raise db_err
-
-            # 6. Publish PostGIS FeatureType ke GeoServer
-            postgis_store = "postgis_default"
-            geoserver_client.ensure_postgis_datastore(
+            return IngestProcessor._save_gdf_to_postgis_and_geoserver(
+                gdf=gdf,
+                job=job,
                 workspace_name=workspace_name,
-                store_name=postgis_store
+                target_display_name=target_display_name,
+                file_type_format="SHP",
+                db=db
             )
-
-            pub_ok = geoserver_client.publish_postgis_feature_type(
-                workspace_name=workspace_name,
-                store_name=postgis_store,
-                table_name=geoserver_name,
-                title=target_display_name,
-                srid=4326
-            )
-            if not pub_ok:
-                raise RuntimeError(f"Gagal mempublikasikan FeatureType '{geoserver_name}' ke GeoServer.")
-
-            # 7. Simpan Metadata Layer Vektor
-            total_bounds = gdf.total_bounds
-            bbox_list = [float(b) for b in total_bounds]
-            geom_type = gdf.geometry.geom_type.iloc[0] if not gdf.empty else "Geometry"
-            wms_url = f"{settings.GEOSERVER_WMS_URL}/{workspace_name}/wms"
-
-            vec_layer = VectorLayer(
-                api_key_id=job.owner_id,
-                workspace_name=workspace_name,
-                table_name=geoserver_name,
-                layer_name=target_display_name,
-                geom_type=geom_type,
-                feature_count=len(gdf),
-                bbox=bbox_list,
-                srid=4326,
-                wms_url=wms_url
-            )
-            db.add(vec_layer)
-            db.commit()
-
-            result_data = {
-                "type": "VECTOR",
-                "workspace_name": workspace_name,
-                "table_name": geoserver_name,
-                "layer_name": target_display_name,
-                "geoserver_name": geoserver_name,
-                "display_name": target_display_name,
-                "title": target_display_name,
-                "geom_type": geom_type,
-                "feature_count": len(gdf),
-                "native_srid": native_srid,
-                "bbox": bbox_list,
-                "wms_url": wms_url
-            }
-
-            return result_data
 
         finally:
             try:
@@ -373,15 +293,6 @@ class IngestProcessor:
     ) -> Dict[str, Any]:
         """Memproses berkas GeoJSON (.geojson / .json) ke PostGIS dan GeoServer."""
         target_display_name = display_name or job.layer_name
-        owner_prefix = str(job.owner_id).replace("-", "")[:8]
-        clean_slug = slugify_layer_name(target_display_name)
-        unique_suffix = uuid.uuid4().hex[:6]
-        # geoserver_name unik
-        geoserver_name = f"vec_{owner_prefix}_{clean_slug}_{unique_suffix}"
-
-        logger.info(f"Processing GeoJSON Job {job.id} for '{target_display_name}' -> geoserver_name='{geoserver_name}'")
-        job.progress = min(job.progress + 15, 85)
-        db.commit()
 
         try:
             # 1. Baca GeoJSON via pyogrio/geopandas
@@ -396,103 +307,14 @@ class IngestProcessor:
             if gdf.empty:
                 raise ValueError("Berkas GeoJSON kosong (tidak ada baris fitur).")
 
-            # 2. CRS Handling: Standar GeoJSON RFC 7946 adalah EPSG:4326
-            if gdf.crs is None:
-                gdf.set_crs(epsg=4326, inplace=True)
-                native_srid = 4326
-            else:
-                native_srid = gdf.crs.to_epsg() or 4326
-                if native_srid != 4326:
-                    gdf = gdf.to_crs(epsg=4326)
-
-            # 3. Validasi Geometri & Multi-Geometry
-            gdf["geometry"] = gdf["geometry"].make_valid()
-            gdf["geometry"] = gdf["geometry"].apply(force_multi_geometry)
-
-            # 4. Sanitasi Kolom
-            new_cols = {}
-            for col in gdf.columns:
-                if col != "geometry":
-                    clean_col = re.sub(r"[^a-zA-Z0-9_]", "_", col.lower().strip()).strip("_")
-                    if clean_col in ("table", "user", "order", "group", "select", "from", "where"):
-                        clean_col = f"col_{clean_col}"
-                    new_cols[col] = clean_col[:50]
-            gdf.rename(columns=new_cols, inplace=True)
-
-            # 5. Staging PostGIS & Atomic Swap
-            staging_table_name = f"staging_{uuid.uuid4().hex[:10]}"
-
-            try:
-                gdf.to_postgis(name=staging_table_name, con=engine, if_exists="replace", index=False)
-
-                with engine.begin() as conn:
-                    conn.execute(text(f"""
-                        DROP TABLE IF EXISTS {geoserver_name} CASCADE;
-                        ALTER TABLE {staging_table_name} RENAME TO {geoserver_name};
-                        CREATE INDEX idx_{geoserver_name}_geom ON {geoserver_name} USING GIST (geometry);
-                    """))
-            except Exception as db_err:
-                try:
-                    with engine.begin() as conn:
-                        conn.execute(text(f"DROP TABLE IF EXISTS {staging_table_name} CASCADE;"))
-                except Exception:
-                    pass
-                raise db_err
-
-            # 6. Publish FeatureType ke GeoServer
-            postgis_store = "postgis_default"
-            geoserver_client.ensure_postgis_datastore(
+            return IngestProcessor._save_gdf_to_postgis_and_geoserver(
+                gdf=gdf,
+                job=job,
                 workspace_name=workspace_name,
-                store_name=postgis_store
+                target_display_name=target_display_name,
+                file_type_format="GEOJSON",
+                db=db
             )
-
-            pub_ok = geoserver_client.publish_postgis_feature_type(
-                workspace_name=workspace_name,
-                store_name=postgis_store,
-                table_name=geoserver_name,
-                title=target_display_name,
-                srid=4326
-            )
-            if not pub_ok:
-                raise RuntimeError(f"Gagal mempublikasikan FeatureType '{geoserver_name}' ke GeoServer.")
-
-            # 7. Simpan Metadata Layer Vektor
-            total_bounds = gdf.total_bounds
-            bbox_list = [float(b) for b in total_bounds]
-            geom_type = gdf.geometry.geom_type.iloc[0] if not gdf.empty else "Geometry"
-            wms_url = f"{settings.GEOSERVER_WMS_URL}/{workspace_name}/wms"
-
-            vec_layer = VectorLayer(
-                api_key_id=job.owner_id,
-                workspace_name=workspace_name,
-                table_name=geoserver_name,
-                layer_name=target_display_name,
-                geom_type=geom_type,
-                feature_count=len(gdf),
-                bbox=bbox_list,
-                srid=4326,
-                wms_url=wms_url
-            )
-            db.add(vec_layer)
-            db.commit()
-
-            result_data = {
-                "type": "VECTOR",
-                "format": "GEOJSON",
-                "workspace_name": workspace_name,
-                "table_name": geoserver_name,
-                "layer_name": target_display_name,
-                "geoserver_name": geoserver_name,
-                "display_name": target_display_name,
-                "title": target_display_name,
-                "geom_type": geom_type,
-                "feature_count": len(gdf),
-                "native_srid": native_srid,
-                "bbox": bbox_list,
-                "wms_url": wms_url
-            }
-
-            return result_data
 
         finally:
             if path.exists():
@@ -560,8 +382,11 @@ class IngestProcessor:
                 conn.execute(text(f"""
                     DROP TABLE IF EXISTS "{geoserver_name}" CASCADE;
                     ALTER TABLE "{staging_table_name}" RENAME TO "{geoserver_name}";
-                    CREATE INDEX idx_{geoserver_name}_geom ON "{geoserver_name}" USING GIST (geometry);
+                    CREATE INDEX "idx_{geoserver_name}_geom" ON "{geoserver_name}" USING GIST (geometry);
                 """))
+            # ANALYZE agar GeoServer memakai estimated extent (tanpa full scan) saat publish.
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+                conn.execute(text(f'ANALYZE "{geoserver_name}"'))
         except Exception as db_err:
             try:
                 with engine.begin() as conn:
@@ -577,19 +402,45 @@ class IngestProcessor:
             store_name=postgis_store
         )
 
+        total_bounds = gdf.total_bounds
+        bbox_list = [float(b) for b in total_bounds]
+
         pub_ok = geoserver_client.publish_postgis_feature_type(
             workspace_name=workspace_name,
             store_name=postgis_store,
             table_name=geoserver_name,
             title=target_display_name,
-            srid=4326
+            srid=4326,
+            bbox=bbox_list
         )
         if not pub_ok:
             raise RuntimeError(f"Gagal mempublikasikan FeatureType '{geoserver_name}' ke GeoServer.")
 
-        total_bounds = gdf.total_bounds
-        bbox_list = [float(b) for b in total_bounds]
         geom_type = gdf.geometry.geom_type.iloc[0] if not gdf.empty else "Geometry"
+
+        # Terapkan default SLD style agar konsisten di semua frontend (mis. titik hijau bulat)
+        style_name = f"style_{geoserver_name}"
+        symbology_meta = None
+        try:
+            sld_xml = style_service.generate_vector_sld(
+                style_name=style_name,
+                geom_type=geom_type
+            )
+            style_service.apply_style(
+                workspace=workspace_name,
+                layer_name=geoserver_name,
+                style_name=style_name,
+                sld_xml=sld_xml
+            )
+            symbology_meta = {
+                "style_name": style_name,
+                "geom_type": geom_type,
+                "fill_color": "#0d9488",
+                "stroke_color": "#0f766e"
+            }
+        except Exception as style_err:
+            logger.warning(f"Tidak dapat menerapkan style default pada layer '{geoserver_name}': {style_err}")
+
         wms_url = f"{settings.GEOSERVER_WMS_URL}/{workspace_name}/wms"
 
         vec_layer = VectorLayer(
@@ -601,6 +452,8 @@ class IngestProcessor:
             feature_count=len(gdf),
             bbox=bbox_list,
             srid=4326,
+            file_format=file_type_format.lower(),
+            symbology=symbology_meta,
             wms_url=wms_url
         )
         db.add(vec_layer)
@@ -619,6 +472,7 @@ class IngestProcessor:
             "feature_count": len(gdf),
             "native_srid": native_srid,
             "bbox": bbox_list,
+            "style_name": style_name,
             "wms_url": wms_url
         }
 

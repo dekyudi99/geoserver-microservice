@@ -249,7 +249,7 @@ def get_my_layers(
     if layer_type != "raster":
         vectors = db.query(VectorLayer).filter(VectorLayer.api_key_id == caller.id).order_by(VectorLayer.created_at.desc()).all()
         for v in vectors:
-            v_fmt = _detect_file_format(v.file_path, "shp")
+            v_fmt = v.file_format or _detect_file_format(v.file_path, "shp")
             result.append({
                 "id": str(v.id),
                 "type": "vector",
@@ -262,14 +262,15 @@ def get_my_layers(
                 "layer_name": v.layer_name,
                 "display_name": v.layer_name,
                 "geom_type": v.geom_type,
+                "geometry_type": v.geom_type,
                 "feature_count": v.feature_count,
                 "bbox": v.bbox,
                 "srid": v.srid or 4326,
                 "epsg": v.srid or 4326,
                 "wms_url": v.wms_url,
                 "wms_layers_param": f"{v.workspace_name}:{v.table_name}",
-                "symbology": None,
-                "style_name": None,
+                "symbology": v.symbology,
+                "style_name": v.symbology.get("style_name") if isinstance(v.symbology, dict) else None,
                 "created_at": str(v.created_at)
             })
     if layer_type != "vector":
