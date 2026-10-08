@@ -31,50 +31,105 @@ class LayerGroupUpdatePayload(BaseModel):
     mode: Optional[str] = "single"
     layer_ids: List[str] = []
 
+import pyproj
+
 class AddLayerPayload(BaseModel):
     layer_id: str
+
+def _bbox_to_wgs84(bbox_coords: List[float], srid: Optional[int]) -> Optional[List[float]]:
+    if not bbox_coords or len(bbox_coords) < 4:
+        return None
+    try:
+        minx, miny, maxx, maxy = float(bbox_coords[0]), float(bbox_coords[1]), float(bbox_coords[2]), float(bbox_coords[3])
+    except (TypeError, ValueError):
+        return None
+
+    # Already valid WGS84 coordinates in degrees
+    if (srid in (4326, None) or str(srid) == "4326") and -180 <= minx <= 180 and -180 <= maxx <= 180 and -90 <= miny <= 90 and -90 <= maxy <= 90:
+        return [minx, miny, maxx, maxy]
+
+    # Transform known projected SRID to EPSG:4326
+    if srid and int(srid) != 4326:
+        try:
+            transformer = pyproj.Transformer.from_crs(int(srid), 4326, always_xy=True)
+            w_minx, w_miny = transformer.transform(minx, miny)
+            w_maxx, w_maxy = transformer.transform(maxx, maxy)
+            if -180 <= w_minx <= 180 and -180 <= w_maxx <= 180 and -90 <= w_miny <= 90 and -90 <= w_maxy <= 90:
+                return [min(w_minx, w_maxx), min(w_miny, w_maxy), max(w_minx, w_maxx), max(w_miny, w_maxy)]
+        except Exception:
+            pass
+
+    # Heuristic fallback for projected meters (e.g. Thailand UTM 32647, Web Mercator 3857, UTM 32648)
+    if abs(minx) > 180 or abs(maxx) > 180 or abs(miny) > 90 or abs(maxy) > 90:
+        for guess_srid in (32647, 3857, 32648):
+            try:
+                transformer = pyproj.Transformer.from_crs(guess_srid, 4326, always_xy=True)
+                w_minx, w_miny = transformer.transform(minx, miny)
+                w_maxx, w_maxy = transformer.transform(maxx, maxy)
+                if -180 <= w_minx <= 180 and -180 <= w_maxx <= 180 and -90 <= w_miny <= 90 and -90 <= w_maxy <= 90:
+                    return [min(w_minx, w_maxx), min(w_miny, w_maxy), max(w_minx, w_maxx), max(w_miny, w_maxy)]
+            except Exception:
+                pass
+
+    return [minx, miny, maxx, maxy]
 
 def resolve_layer_details(db: Session, layer_ids: List[str]):
     resolved = []
     bboxes = []
     for lid in layer_ids:
         layer_obj = None
+        layer_srid = 4326
         try:
             u = uuid.UUID(str(lid))
             layer_obj = db.query(VectorLayer).filter(VectorLayer.id == u).first()
-            if not layer_obj:
+            if layer_obj:
+                layer_srid = getattr(layer_obj, "srid", 4326) or 4326
+            else:
                 layer_obj = db.query(RasterMetadata).filter(RasterMetadata.id == u).first()
+                if layer_obj:
+                    layer_srid = getattr(layer_obj, "epsg", 4326) or 4326
         except Exception:
             layer_obj = db.query(VectorLayer).filter(
                 (VectorLayer.table_name == lid) | (VectorLayer.layer_name == lid)
             ).first()
-            if not layer_obj:
+            if layer_obj:
+                layer_srid = getattr(layer_obj, "srid", 4326) or 4326
+            else:
                 layer_obj = db.query(RasterMetadata).filter(
                     (RasterMetadata.store_name == lid) | (RasterMetadata.layer_name == lid)
                 ).first()
+                if layer_obj:
+                    layer_srid = getattr(layer_obj, "epsg", 4326) or 4326
 
         if layer_obj:
             geoserver_name = getattr(layer_obj, "table_name", None) or getattr(layer_obj, "store_name", None)
+            raw_b = layer_obj.bbox
+            normalized_b = None
+            if raw_b:
+                if isinstance(raw_b, list) and len(raw_b) >= 4:
+                    normalized_b = [float(x) for x in raw_b[:4]]
+                elif isinstance(raw_b, dict):
+                    left = raw_b.get("left") or raw_b.get("minx")
+                    bottom = raw_b.get("bottom") or raw_b.get("miny")
+                    right = raw_b.get("right") or raw_b.get("maxx")
+                    top = raw_b.get("top") or raw_b.get("maxy")
+                    if left is not None and bottom is not None:
+                        normalized_b = [float(left), float(bottom), float(right), float(top)]
+
+            wgs84_b = _bbox_to_wgs84(normalized_b, layer_srid) if normalized_b else None
+
             resolved.append({
                 "id": str(layer_obj.id),
                 "layer_id": str(layer_obj.id),
                 "layer_name": layer_obj.layer_name,
                 "geoserver_name": geoserver_name,
                 "workspace_name": layer_obj.workspace_name,
-                "bbox": layer_obj.bbox
+                "srid": layer_srid,
+                "bbox": wgs84_b or raw_b
             })
-            if layer_obj.bbox:
-                if isinstance(layer_obj.bbox, list) and len(layer_obj.bbox) >= 4:
-                    bboxes.append(layer_obj.bbox)
-                elif isinstance(layer_obj.bbox, dict):
-                    b = layer_obj.bbox
-                    left = b.get("left") or b.get("minx")
-                    bottom = b.get("bottom") or b.get("miny")
-                    right = b.get("right") or b.get("maxx")
-                    top = b.get("top") or b.get("maxy")
-                    if left is not None and bottom is not None:
-                        bboxes.append([left, bottom, right, top])
-    
+            if wgs84_b:
+                bboxes.append(wgs84_b)
+
     # Combined bbox
     combined_bbox = None
     if bboxes:
@@ -184,6 +239,15 @@ def list_layer_groups(
     result = []
     for g in groups:
         lids = g.layer_ids if isinstance(g.layer_ids, list) else []
+        resolved_layers, comb_bbox = resolve_layer_details(db, lids)
+
+        # Sanitize bbox to WGS84
+        effective_bbox = g.bbox
+        if not effective_bbox or (isinstance(effective_bbox, list) and any(abs(float(c)) > 180 for c in effective_bbox[:4])):
+            effective_bbox = comb_bbox
+            g.bbox = comb_bbox
+            db.commit()
+
         result.append({
             "id": str(g.id),
             "name": g.name,
@@ -195,9 +259,10 @@ def list_layer_groups(
             "mode": g.mode or "single",
             "wms_url": g.wms_url,
             "wms_layers_param": g.wms_layers_param,
-            "bbox": g.bbox,
+            "bbox": effective_bbox,
             "layer_count": len(lids),
             "layer_ids": lids,
+            "layers": resolved_layers,
             "created_at": g.created_at.isoformat() if g.created_at else None
         })
 
