@@ -29,7 +29,7 @@ origins = [
     "http://localhost:8000",
     "http://localhost:8001",
     "http://localhost:8005",
-    "https://astragis.ikya.my.id",
+    "https://voxagis.wefgis.com",
     "https://api-astragis.ikya.my.id",
     "https://flowgis.wefgis.com",
     "https://api-flowgis.wefgis.com",
