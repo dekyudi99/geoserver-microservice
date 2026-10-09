@@ -63,8 +63,35 @@ def startup_event():
     except Exception as e:
         logger.warning(f"Could not update stale ingest jobs: {e}")
 
+    try:
+        import requests
+        assets_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+        if os.path.exists(assets_folder):
+            for f in os.listdir(assets_folder):
+                if f.lower().endswith(".svg"):
+                    f_path = os.path.join(assets_folder, f)
+                    with open(f_path, "rb") as fp:
+                        content = fp.read()
+                    requests.put(
+                        f"{settings.GEOSERVER_URL.rstrip('/')}/rest/resource/styles/{f}",
+                        data=content,
+                        headers={"Content-Type": "image/svg+xml"},
+                        auth=(settings.GEOSERVER_USER, settings.GEOSERVER_PASS),
+                        timeout=5
+                    )
+            logger.info("SVG style assets synchronized to GeoServer resource store.")
+    except Exception as e:
+        logger.warning(f"Could not synchronize SVG assets to GeoServer: {e}")
+
 # 1. Mount official V1 API Router
 app.include_router(api_v1_router)
+
+# Mount Static Assets (SVG icons for vector styling)
+import os
+from fastapi.staticfiles import StaticFiles
+ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+os.makedirs(ASSETS_DIR, exist_ok=True)
+app.mount("/assets", StaticFiles(directory=ASSETS_DIR), name="assets")
 
 # 2. Dedicated Swagger UI and OpenAPI Schema for v1
 @app.get("/api/v1/openapi.json", include_in_schema=False)

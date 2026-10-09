@@ -1,9 +1,13 @@
+import os
+import re
+import uuid
+import datetime
+import logging
 from typing import Optional, List, Dict, Any
+
 from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-import uuid
-import datetime
 
 from ...services.style_service import style_service
 from ...models.spatial_data import RasterMetadata, VectorLayer
@@ -11,6 +15,10 @@ from ...models.api_key import ApiKey, ApiKeyType
 from ...security.auth import require_any_key
 from ...config.database import get_db
 from ...services.audit_service import log_action
+
+logger = logging.getLogger("geoserver_service.v1_style")
+
+ASSETS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "assets"))
 
 router = APIRouter(prefix="/styles", tags=["Styles"])
 
@@ -124,6 +132,7 @@ def apply_style(
                 allowed_symbol_fields = {
                     "fill_color", "fill_opacity", "stroke_color", "stroke_width",
                     "stroke_opacity", "point_size", "mark", "stroke_dasharray",
+                    "marker_type", "icon_name", "icon_url"
                 }
                 unknown_fields = set(symbol) - allowed_symbol_fields
                 if unknown_fields:
@@ -145,6 +154,8 @@ def apply_style(
                         point_size=symbol.get("point_size", 8),
                         mark=symbol.get("mark", "circle"),
                         stroke_dasharray=symbol.get("stroke_dasharray"),
+                        icon_name=symbol.get("icon_name"),
+                        icon_url=symbol.get("icon_url"),
                     )
                 except ValueError as exc:
                     raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -184,6 +195,9 @@ def apply_style(
                     "point_size": float(symbol.get("point_size", 8)),
                     "mark": symbol.get("mark", "circle"),
                     "stroke_dasharray": symbol.get("stroke_dasharray"),
+                    "marker_type": symbol.get("marker_type", "shape"),
+                    "icon_name": symbol.get("icon_name"),
+                    "icon_url": symbol.get("icon_url"),
                 },
                 "style_name": st_name,
                 "updated_at": updated_at,
@@ -259,15 +273,146 @@ def get_raster_info(
     if not stats:
         stats = {"min": 0, "max": 100, "mean": 50, "std": 10}
 
+    active_symbology = raster_obj.symbology if (isinstance(raster_obj.symbology, dict) and raster_obj.symbology.get("classes")) else None
+
+    if not active_symbology:
+        # 1. Try detecting active SLD style from GeoServer
+        try:
+            from ...clients.geoserver_client import geoserver_client
+
+            layer_info = geoserver_client.get_layer(
+                layer_name=raster_obj.store_name,
+                workspace_name=raster_obj.workspace_name
+            ) or geoserver_client.get_layer(layer_name=raster_obj.store_name)
+
+            style_name = None
+            if layer_info and isinstance(layer_info, dict):
+                style_name = layer_info.get("defaultStyle", {}).get("name")
+
+            if style_name and style_name.lower() != "raster":
+                sld_path = f"/rest/workspaces/{raster_obj.workspace_name}/styles/{style_name}.sld"
+                res = geoserver_client._request("GET", sld_path)
+                if res.status_code != 200:
+                    sld_path = f"/rest/styles/{style_name}.sld"
+                    res = geoserver_client._request("GET", sld_path)
+
+                if res.status_code == 200 and res.text:
+                    parsed = style_service.parse_raster_sld(res.text)
+                    if parsed and parsed.get("entries"):
+                        entries = parsed["entries"]
+                        sld_style_type = parsed["style_type"]
+                        classes = []
+                        min_stat = stats.get("min", 0.0) if stats else 0.0
+                        for idx, entry in enumerate(entries):
+                            q = entry["quantity"]
+                            if sld_style_type == "values":
+                                c_min = q
+                                c_max = q
+                            else:
+                                c_min = min_stat if idx == 0 else entries[idx - 1]["quantity"]
+                                c_max = q
+                            lbl = entry["label"] or (
+                                f"Value {q}" if sld_style_type == "values"
+                                else f"{c_min} - {c_max}"
+                            )
+                            classes.append({
+                                "min": c_min,
+                                "max": c_max,
+                                "quantity": q,
+                                "color": entry["color"],
+                                "opacity": entry["opacity"],
+                                "label": lbl
+                            })
+
+                        active_symbology = {
+                            "layer_kind": "raster",
+                            "classes": classes,
+                            "style_type": sld_style_type,
+                            "classification_method": "manual",
+                            "classes_count": len(classes),
+                            "color_ramp": "custom",
+                            "style_name": style_name,
+                            "updated_at": raster_obj.created_at.isoformat() if raster_obj.created_at else None
+                        }
+                        raster_obj.symbology = active_symbology
+                        db.commit()
+        except Exception as sld_err:
+            logger.warning(f"Gagal mendeteksi SLD GeoServer untuk raster {raster_obj.id}: {sld_err}")
+
+    if not active_symbology and raster_obj.file_path:
+        # 2. Try detecting embedded colormap in TIFF file
+        try:
+            import rasterio
+            with rasterio.open(raster_obj.file_path) as src:
+                try:
+                    cmap = src.colormap(1)
+                except Exception:
+                    cmap = None
+
+                if cmap and isinstance(cmap, dict) and len(cmap) > 0:
+                    classes = []
+                    sorted_keys = sorted(cmap.keys())
+                    for k in sorted_keys:
+                        rgba = cmap[k]
+                        hex_col = f"#{rgba[0]:02x}{rgba[1]:02x}{rgba[2]:02x}"
+                        op = round(rgba[3] / 255.0, 2) if len(rgba) > 3 else 1.0
+                        classes.append({
+                            "min": k,
+                            "max": k,
+                            "quantity": k,
+                            "color": hex_col,
+                            "opacity": op,
+                            "label": f"Class {k}"
+                        })
+                    if classes:
+                        active_symbology = {
+                            "layer_kind": "raster",
+                            "classes": classes,
+                            "style_type": "values",
+                            "classification_method": "manual",
+                            "classes_count": len(classes),
+                            "color_ramp": "custom",
+                            "style_name": f"embedded_{raster_obj.store_name}",
+                            "updated_at": raster_obj.created_at.isoformat() if raster_obj.created_at else None
+                        }
+                        raster_obj.symbology = active_symbology
+                        db.commit()
+        except Exception as tiff_err:
+            logger.warning(f"Gagal mendeteksi embedded colormap TIFF untuk raster {raster_obj.id}: {tiff_err}")
+
     return {
         "id": str(raster_obj.id),
         "workspace_name": raster_obj.workspace_name,
         "layer_name": raster_obj.store_name,
         "statistics": stats,
-        "saved_symbology": raster_obj.symbology,
+        "saved_symbology": active_symbology,
         "dimensions": raster_obj.dimensions,
         "bbox": raster_obj.bbox
     }
+
+@router.get("/icons", status_code=status.HTTP_200_OK)
+def get_available_icons():
+    """
+    Mengambil daftar icon SVG yang tersedia di app/assets untuk marker vector layer.
+    """
+    icons = []
+    if os.path.exists(ASSETS_DIR):
+        for f in sorted(os.listdir(ASSETS_DIR)):
+            if f.lower().endswith(".svg"):
+                name_clean = os.path.splitext(f)[0]
+                formatted_name = " ".join([
+                    word.capitalize() for word in re.split(r"[-_]+", name_clean)
+                    if word and word.lower() not in ("svgrepo", "com")
+                ])
+                if not formatted_name:
+                    formatted_name = name_clean.capitalize()
+                icons.append({
+                    "id": f,
+                    "filename": f,
+                    "name": formatted_name,
+                    "url": f"/assets/{f}"
+                })
+    return {"total": len(icons), "data": icons}
 
 @router.delete("/{style_name}")
 def delete_style(style_name: str, workspace: Optional[str] = None, recurse: bool = True):
@@ -276,3 +421,4 @@ def delete_style(style_name: str, workspace: Optional[str] = None, recurse: bool
     if not success:
         raise HTTPException(status_code=500, detail=f"Gagal menghapus style '{style_name}'.")
     return {"success": True, "detail": f"Style '{style_name}' berhasil dihapus."}
+

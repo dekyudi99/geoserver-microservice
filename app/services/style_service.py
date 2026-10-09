@@ -1,5 +1,6 @@
 import html
 import math
+import os
 import re
 from typing import List, Dict, Any, Optional
 from ..clients.geoserver_client import geoserver_client
@@ -66,6 +67,49 @@ class StyleService:
 """
         return sld_xml
 
+    def parse_raster_sld(self, sld_xml: str) -> Optional[Dict[str, Any]]:
+        """
+        Parse SLD XML to extract Raster ColorMap and ColorMapEntry items.
+        Returns dict with style_type and entries list, or None if no ColorMap found.
+        """
+        if not sld_xml:
+            return None
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(sld_xml)
+            style_type = "intervals"
+            raw_entries = []
+            for elem in root.iter():
+                tag = elem.tag.split("}")[-1]
+                if tag == "ColorMap":
+                    style_type = elem.attrib.get("type", "intervals")
+                elif tag == "ColorMapEntry":
+                    c = elem.attrib.get("color")
+                    if c:
+                        try:
+                            q = float(elem.attrib.get("quantity", 0))
+                        except (ValueError, TypeError):
+                            q = 0.0
+                        try:
+                            op = float(elem.attrib.get("opacity", 1.0))
+                        except (ValueError, TypeError):
+                            op = 1.0
+                        lbl = elem.attrib.get("label", "")
+                        raw_entries.append({
+                            "color": c,
+                            "quantity": q,
+                            "opacity": op,
+                            "label": lbl
+                        })
+            if raw_entries:
+                return {
+                    "style_type": style_type,
+                    "entries": raw_entries
+                }
+        except Exception as e:
+            logger.warning(f"Error parsing raster SLD XML: {e}")
+        return None
+
     def generate_vector_sld(
         self,
         style_name: str,
@@ -78,6 +122,8 @@ class StyleService:
         point_size: float = 8.0,
         mark: str = "circle",
         stroke_dasharray: Optional[str] = None,
+        icon_name: Optional[str] = None,
+        icon_url: Optional[str] = None,
     ) -> str:
         """
         Generate SLD 1.0.0 XML untuk Vector Layer (Polygon, Line, Point).
@@ -118,6 +164,18 @@ class StyleService:
             f'                    <CssParameter name="fill-opacity">{fill_opacity}</CssParameter>'
         )
 
+        dash_xml = ""
+        if stroke_dasharray:
+            parts = str(stroke_dasharray).split(",")
+            if len(parts) > 8:
+                raise ValueError("stroke_dasharray maksimal memiliki 8 nilai.")
+            values = [validate_number(part.strip(), "stroke_dasharray", 0, 100) for part in parts]
+            dash_xml = (
+                "\n                <CssParameter name=\"stroke-dasharray\">"
+                + " ".join(str(value) for value in values)
+                + "</CssParameter>"
+            )
+
         if geometry_family == "polygon":
             symbolizer_xml = f"""            <PolygonSymbolizer>
               <Fill>
@@ -126,21 +184,10 @@ class StyleService:
               <Stroke>
                 <CssParameter name="stroke">{stroke_color}</CssParameter>
                 <CssParameter name="stroke-width">{stroke_width}</CssParameter>
-                <CssParameter name="stroke-opacity">{stroke_opacity}</CssParameter>
+                <CssParameter name="stroke-opacity">{stroke_opacity}</CssParameter>{dash_xml}
               </Stroke>
             </PolygonSymbolizer>"""
         elif geometry_family == "line":
-            dash_xml = ""
-            if stroke_dasharray:
-                parts = str(stroke_dasharray).split(",")
-                if len(parts) > 8:
-                    raise ValueError("stroke_dasharray maksimal memiliki 8 nilai.")
-                values = [validate_number(part.strip(), "stroke_dasharray", 0, 100) for part in parts]
-                dash_xml = (
-                    "\n                <CssParameter name=\"stroke-dasharray\">"
-                    + " ".join(str(value) for value in values)
-                    + "</CssParameter>"
-                )
             symbolizer_xml = f"""            <LineSymbolizer>
               <Stroke>
                 <CssParameter name="stroke">{stroke_color}</CssParameter>
@@ -149,13 +196,32 @@ class StyleService:
               </Stroke>
             </LineSymbolizer>"""
         else:
-            supported_marks = {"circle", "square", "triangle", "star", "cross", "x"}
-            mark = str(mark or "circle").lower()
-            if mark not in supported_marks:
-                raise ValueError(f"Bentuk marker tidak didukung: {mark}.")
-            if mark == "x":
-                mark = "cross"
-            symbolizer_xml = f"""            <PointSymbolizer>
+            actual_icon = icon_name
+            if not actual_icon and mark and str(mark).startswith("icon:"):
+                actual_icon = str(mark)[5:]
+
+            if actual_icon:
+                safe_icon = os.path.basename(actual_icon)
+                # Di GeoServer, ExternalGraphic harus menggunakan relative path ke styles folder (misal "water-svgrepo-com.svg")
+                # Jika menggunakan URL HTTP, Batik SVG engine GeoServer akan memblokir request karena policy keamanan dan fallback ke kotak hitam/abu-abu.
+                safe_href = html.escape(safe_icon, quote=True)
+                symbolizer_xml = f"""            <PointSymbolizer>
+              <Graphic>
+                <ExternalGraphic>
+                  <OnlineResource xlink:type="simple" xlink:href="{safe_href}"/>
+                  <Format>image/svg+xml</Format>
+                </ExternalGraphic>
+                <Size>{point_size}</Size>
+              </Graphic>
+            </PointSymbolizer>"""
+            else:
+                supported_marks = {"circle", "square", "triangle", "star", "cross", "x"}
+                mark = str(mark or "circle").lower()
+                if mark not in supported_marks:
+                    raise ValueError(f"Bentuk marker tidak didukung: {mark}.")
+                if mark == "x":
+                    mark = "cross"
+                symbolizer_xml = f"""            <PointSymbolizer>
               <Graphic>
                 <Mark>
                   <WellKnownName>{mark}</WellKnownName>
@@ -165,7 +231,7 @@ class StyleService:
                   <Stroke>
                     <CssParameter name="stroke">{stroke_color}</CssParameter>
                     <CssParameter name="stroke-width">{stroke_width}</CssParameter>
-                    <CssParameter name="stroke-opacity">{stroke_opacity}</CssParameter>
+                    <CssParameter name="stroke-opacity">{stroke_opacity}</CssParameter>{dash_xml}
                   </Stroke>
                 </Mark>
                 <Size>{point_size}</Size>
