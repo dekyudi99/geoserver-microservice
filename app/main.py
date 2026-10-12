@@ -15,31 +15,16 @@ app = FastAPI(
     title="GeoServer Microservice API",
     description="Layanan mikro terisolasi untuk integrasi GeoServer, ingest data spasial PostGIS, dan API Key Management mandiri",
     version="2.0.0",
-    docs_url="/docs",
-    openapi_url="/openapi.json"
+    docs_url="/docs" if settings.ENABLE_DOCS else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if settings.ENABLE_DOCS else None
 )
 
-# CORS
-origins = [
-    "http://localhost:5173",
-    "http://localhost:5175",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:5175",
-    "http://localhost:3000",
-    "http://localhost:8000",
-    "http://localhost:8001",
-    "http://localhost:8005",
-    "https://voxagis.wefgis.com",
-    "https://api-astragis.ikya.my.id",
-    "https://flowgis.wefgis.com",
-    "https://api-flowgis.wefgis.com",
-]
-
+# CORS (Model Opsi A: Izinkan semua origin via X-API-Key authentication)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -51,6 +36,10 @@ def startup_event():
     try:
         ensure_postgis_extension()
         create_all_tables()
+        from sqlalchemy import text
+        from .config.database import engine
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS quota_bytes BIGINT DEFAULT 524288000;"))
     except Exception as e:
         logger.warning(f"Could not connect or initialize tables on startup: {e}")
 

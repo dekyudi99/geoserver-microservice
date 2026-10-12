@@ -76,5 +76,29 @@ def delete_api_key(key_id: str, db: Session) -> bool:
     clear_key_cache()
     return True
 
+def rotate_api_key(key_id: str, db: Session) -> Tuple[str, ApiKey]:
+    """
+    Merotasi rahasia API Key tanpa mengubah record ID (UUID).
+    Semua relasi data spasial, workspace, dan layer tetap utuh pada pemiliknya!
+    """
+    from ..security.auth import clear_key_cache
+    api_key = db.query(ApiKey).filter(ApiKey.id == key_id).first()
+    if not api_key:
+        raise ValueError("API Key tidak ditemukan.")
+
+    prefix = PREFIX_PRIMARY if api_key.key_type == ApiKeyType.PRIMARY else PREFIX_STANDARD
+    plain_key = prefix + secrets.token_urlsafe(36)
+    hashed = _hash_key(plain_key)
+
+    api_key.key_hash = hashed
+    api_key.key_prefix = prefix
+    api_key.is_active = True
+    db.commit()
+    db.refresh(api_key)
+    clear_key_cache()
+    logger.info(f"API Key '{api_key.name}' (ID: {key_id}) berhasil dirotasi (in-place).")
+    return plain_key, api_key
+
 def list_api_keys(db: Session) -> List[ApiKey]:
     return db.query(ApiKey).order_by(ApiKey.created_at.desc()).all()
+

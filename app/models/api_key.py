@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Boolean, Text, Enum as SAEnum, DateTime
+from sqlalchemy import Column, String, Boolean, Text, Enum as SAEnum, DateTime, BigInteger
 from sqlalchemy.dialects.postgresql import UUID
 from ..config.database import Base
 from .mixins import TimestampMixin
@@ -19,4 +19,5 @@ class ApiKey(TimestampMixin, Base):
     key_type = Column(SAEnum(ApiKeyType), nullable=False)           # PRIMARY atau STANDARD
     owner_info = Column(Text, nullable=True)                        # JSON string: info pemilik (opsional)
     is_active = Column(Boolean, default=True, nullable=False)
+    quota_bytes = Column(BigInteger, default=524288000, nullable=True) # Custom quota limit (default 500 MB)
     last_used_at = Column(DateTime(timezone=True), nullable=True)

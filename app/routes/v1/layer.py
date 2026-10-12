@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel
 import logging
@@ -20,8 +20,10 @@ from ...models.api_key import ApiKey, ApiKeyType
 from ...models.spatial_data import VectorLayer, RasterMetadata, WorkspaceMetadata
 from ...services.hash_id import encode_id, decode_id, resolve_workspace
 from ...security.auth import require_any_key
+from ...security.rate_limiter import rate_limit
 from ...services.audit_service import log_action
 from ...models.ingest_job import IngestJob
+from .api_keys import get_disk_usage_for_key, MAX_SPATIAL_QUOTA_BYTES
 
 logger = logging.getLogger("geoserver_service.v1_layer")
 
@@ -30,7 +32,12 @@ router = APIRouter(prefix="/layers", tags=["Layers"])
 os.makedirs(settings.DATA_VECTOR_PATH, exist_ok=True)
 os.makedirs(settings.DATA_RASTER_PATH, exist_ok=True)
 
-@router.post("/publish-vector", response_model=VectorPublishResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/publish-vector",
+    response_model=VectorPublishResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("upload"))]
+)
 async def publish_vector(
     workspace_name: str = Form(...),
     layer_name: str = Form(...),
@@ -48,6 +55,17 @@ async def publish_vector(
     try:
         with open(saved_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+
+        file_sz = os.path.getsize(saved_path)
+        usage = get_disk_usage_for_key(caller.id, db)
+        max_limit = usage.get("max_quota_bytes", MAX_SPATIAL_QUOTA_BYTES)
+        if usage["total_bytes"] + file_sz > max_limit:
+            if os.path.exists(saved_path):
+                os.remove(saved_path)
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Batas kuota penyimpanan data spasial ({usage['max_quota_readable']}) untuk API Key ini telah tercapai. Total terpakai saat ini: {usage['total_readable']}, kuota: {usage['max_quota_readable']}."
+            )
 
         # 1. Read vector
         gdf, format_name = vector_service.read_vector_file_to_gdf(saved_path)
@@ -126,7 +144,12 @@ async def publish_vector(
         )
         raise HTTPException(status_code=400, detail=f"Gagal memproses data vektor: {str(e)}")
 
-@router.post("/publish-raster", response_model=RasterPublishResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/publish-raster",
+    response_model=RasterPublishResponse,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("upload"))]
+)
 async def publish_raster(
     workspace_name: str = Form(...),
     layer_name: str = Form(...),
@@ -147,6 +170,17 @@ async def publish_raster(
     try:
         with open(saved_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+
+        file_sz = os.path.getsize(saved_path)
+        usage = get_disk_usage_for_key(caller.id, db)
+        max_limit = usage.get("max_quota_bytes", MAX_SPATIAL_QUOTA_BYTES)
+        if usage["total_bytes"] + file_sz > max_limit:
+            if os.path.exists(saved_path):
+                os.remove(saved_path)
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Batas kuota penyimpanan data spasial ({usage['max_quota_readable']}) untuk API Key ini telah tercapai. Total terpakai saat ini: {usage['total_readable']}, kuota: {usage['max_quota_readable']}."
+            )
 
         parsed_style = json.loads(style_config) if style_config else None
 
@@ -234,7 +268,10 @@ def _detect_file_format(file_path: Optional[str], default_format: str) -> str:
         return "shp"
     return default_format
 
-@router.get("/my-layers")
+@router.get(
+    "/my-layers",
+    dependencies=[Depends(rate_limit("read"))]
+)
 def get_my_layers(
     layer_type: Optional[str] = None,
     db: Session = Depends(get_db),

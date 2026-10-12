@@ -44,4 +44,15 @@ class Settings:
     MAX_FILES_PER_BATCH: int = int(os.getenv("MAX_FILES_PER_BATCH", "10"))
     MAX_BATCH_SIZE_MB: int = int(os.getenv("MAX_BATCH_SIZE_MB", "0"))  # 0 = unlimited
 
+    # Rate Limiting Configuration (mudah diatur via .env)
+    RATE_LIMIT_ENABLED: bool = os.getenv("RATE_LIMIT_ENABLED", "true").lower() in ("true", "1", "yes")
+    RATE_LIMIT_UPLOAD_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_UPLOAD_PER_MINUTE", "10"))   # Operasi upload/publish/ingest berat
+    RATE_LIMIT_READ_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_READ_PER_MINUTE", "120"))      # Operasi baca/query metadata
+    RATE_LIMIT_GLOBAL_PER_MINUTE: int = int(os.getenv("RATE_LIMIT_GLOBAL_PER_MINUTE", "300"))  # Kumulatif safety-net per API Key/IP
+
+    # S2S Internal Security & Docs
+    INTERNAL_SERVICE_SECRET: str = os.getenv("INTERNAL_SERVICE_SECRET", "voxagis_s2s_internal_secret_key_2026")
+    ENABLE_DOCS: bool = os.getenv("ENABLE_DOCS", "true").lower() in ("true", "1", "yes")
+    DEFAULT_QUOTA_MB: int = int(os.getenv("DEFAULT_QUOTA_MB", "500"))
+
 settings = Settings()

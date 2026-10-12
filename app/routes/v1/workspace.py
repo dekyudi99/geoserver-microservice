@@ -10,6 +10,7 @@ from ...clients.geoserver_client import geoserver_client
 from ...schemas.v1.spatial_data import WorkspaceCreateRequest
 from ...config.database import get_db, engine
 from ...security.auth import get_verified_key
+from ...security.rate_limiter import rate_limit
 from ...models.spatial_data import WorkspaceMetadata, VectorLayer, RasterMetadata, LayerGroupMetadata
 from ...models.ingest_job import IngestJob
 from ...models.api_key import ApiKeyType
@@ -27,7 +28,11 @@ def slugify_name(name: str) -> str:
         cleaned = f"ws_{cleaned}"
     return f"{cleaned[:35]}_{uuid.uuid4().hex[:6]}"
 
-@router.get("", response_model=List[Dict[str, Any]])
+@router.get(
+    "",
+    response_model=List[Dict[str, Any]],
+    dependencies=[Depends(rate_limit("read"))]
+)
 def list_workspaces(
     all: bool = Query(False, description="Tampilkan semua workspace jika pemanggil adalah admin/primary"),
     db: Session = Depends(get_db),
@@ -101,7 +106,11 @@ def get_workspace(
         "created_at": meta.created_at.isoformat() if meta and meta.created_at else None,
     }
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(rate_limit("upload"))]
+)
 def create_workspace(
     body: WorkspaceCreateRequest,
     db: Session = Depends(get_db),

@@ -24,6 +24,8 @@ from ...services.ingest.providers.local import LocalUploadProvider
 from ...services.ingest.runners.background import BackgroundTasksRunner
 from ...services.hash_id import resolve_workspace
 from ...security.auth import get_verified_key
+from ...security.rate_limiter import rate_limit
+from .api_keys import get_disk_usage_for_key, MAX_SPATIAL_QUOTA_BYTES
 
 logger = logging.getLogger("geoserver_service.ingest_router")
 
@@ -33,7 +35,8 @@ router = APIRouter(prefix="/ingest", tags=["Data Ingestion"])
     "/uploads",
     response_model=IngestJobResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Upload & Ingest Spatial Data dari Perangkat (Single File)"
+    summary="Upload & Ingest Spatial Data dari Perangkat (Single File)",
+    dependencies=[Depends(rate_limit("upload"))]
 )
 def upload_and_ingest(
     background_tasks: BackgroundTasks,
@@ -64,6 +67,19 @@ def upload_and_ingest(
     provider = LocalUploadProvider(file)
     try:
         downloaded = provider.download(job_staging_dir)
+        file_sz = downloaded.local_path.stat().st_size if downloaded.local_path.exists() else 0
+        usage = get_disk_usage_for_key(caller.id, db)
+        max_limit = usage.get("max_quota_bytes", MAX_SPATIAL_QUOTA_BYTES)
+        if usage["total_bytes"] + file_sz > max_limit:
+            import shutil
+            if job_staging_dir.exists():
+                shutil.rmtree(job_staging_dir, ignore_errors=True)
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Batas kuota penyimpanan data spasial ({usage['max_quota_readable']}) untuk API Key ini telah tercapai. Total terpakai saat ini: {usage['total_readable']}, kuota: {usage['max_quota_readable']}."
+            )
+    except HTTPException:
+        raise
     except ValueError as val_err:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(val_err))
     except Exception as e:
@@ -97,7 +113,8 @@ def upload_and_ingest(
     "/batch-uploads",
     response_model=BatchUploadResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Upload & Ingest Banyak Berkas Spasial Sekaligus (Multi-File)"
+    summary="Upload & Ingest Banyak Berkas Spasial Sekaligus (Multi-File)",
+    dependencies=[Depends(rate_limit("upload"))]
 )
 def batch_upload_and_ingest(
     background_tasks: BackgroundTasks,

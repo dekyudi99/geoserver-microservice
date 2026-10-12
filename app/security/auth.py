@@ -92,6 +92,28 @@ def require_primary_key(api_key: SimpleNamespace = Depends(get_verified_key)) ->
         )
     return api_key
 
+internal_secret_header = APIKeyHeader(name="X-Internal-Secret", auto_error=False)
+
+def require_primary_or_internal_secret(
+    x_internal_secret: Optional[str] = Security(internal_secret_header),
+    x_api_key: Optional[str] = Security(api_key_header),
+    auth_bearer: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
+    api_key_query: Optional[str] = Query(None, alias="api_key"),
+    db: Session = Depends(get_db)
+) -> SimpleNamespace:
+    from ..config.settings import settings
+    import uuid
+    if x_internal_secret and settings.INTERNAL_SERVICE_SECRET and x_internal_secret == settings.INTERNAL_SERVICE_SECRET:
+        return SimpleNamespace(
+            id=uuid.UUID("00000000-0000-0000-0000-000000000000"),
+            name="Internal-Service",
+            key_type=ApiKeyType.PRIMARY,
+            key_prefix="internal_",
+            is_active=True
+        )
+    verified = get_verified_key(x_api_key=x_api_key, auth_bearer=auth_bearer, api_key_query=api_key_query, db=db)
+    return require_primary_key(verified)
+
 def require_any_key(api_key: SimpleNamespace = Depends(get_verified_key)) -> SimpleNamespace:
     return api_key
 
