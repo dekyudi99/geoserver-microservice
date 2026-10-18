@@ -12,7 +12,7 @@ from shapely.geometry import (
     MultiPolygon, MultiLineString, MultiPoint, GeometryCollection
 )
 from shapely.validation import make_valid
-from ..config.database import engine, ensure_postgis_extension
+from ..config.database import engine, spatial_engine, ensure_postgis_extension
 from ..config.settings import settings
 from ..clients.geoserver_client import geoserver_client
 from .style_service import style_service
@@ -255,7 +255,7 @@ class VectorService:
 
         clean_gdf.to_postgis(
             name=table_name,
-            con=engine,
+            con=spatial_engine,
             if_exists="replace",
             index=False,
             schema="public"

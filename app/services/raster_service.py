@@ -142,15 +142,40 @@ class RasterService:
         if not success:
             raise RuntimeError(f"Gagal membuat coveragestore '{store_name}' di GeoServer.")
 
-        # 3. Handle default / custom style jika dikonfigurasi
+        # 3. Handle default / custom style jika dikonfigurasi, atau buat default sensible style jika belum ada
         symbology = None
-        if style_config and style_config.get("colors"):
-            try:
+        try:
+            colors = []
+            style_type = "intervals"
+            if style_config and style_config.get("colors"):
+                colors = style_config.get("colors", [])
+                style_type = style_config.get("style_type", "intervals")
+            else:
+                # Default SLD agar raster tidak kosong di GeoServer WMS
+                stats = self.get_raster_statistics(file_path)
+                min_v = stats["min"]
+                max_v = stats["max"]
+                palette = COLOR_RAMPS.get("cyan_blue_magenta", ["#00e5ff", "#0044ff", "#ff00ee"])
+                interpolated = interpolate_palette(palette, 5)
+                step = (max_v - min_v) / 5 if max_v > min_v else 1.0
+                for i in range(5):
+                    q = round(min_v + (i + 1) * step, 2)
+                    c_min = round(min_v + i * step, 2)
+                    colors.append({
+                        "quantity": q,
+                        "min": c_min,
+                        "max": q,
+                        "color": interpolated[i],
+                        "opacity": 1.0,
+                        "label": f"{c_min} - {q}"
+                    })
+
+            if colors:
                 layer_style_name = f"style_{store_name}"
                 sld_xml = style_service.generate_raster_sld(
                     style_name=layer_style_name,
-                    color_entries=style_config.get("colors", []),
-                    style_type=style_config.get("style_type", "intervals")
+                    color_entries=colors,
+                    style_type=style_type
                 )
                 style_service.apply_style(
                     workspace=workspace_name,
@@ -159,12 +184,15 @@ class RasterService:
                     sld_xml=sld_xml
                 )
                 symbology = {
+                    "layer_kind": "raster",
                     "style_name": layer_style_name,
-                    "style_type": style_config.get("style_type", "intervals"),
-                    "classes_count": len(style_config.get("colors", []))
+                    "style_type": style_type,
+                    "classes_count": len(colors),
+                    "colors": colors,
+                    "classes": colors
                 }
-            except Exception as e:
-                logger.warning(f"Gagal menerapkan style raster: {e}")
+        except Exception as e:
+            logger.warning(f"Gagal menerapkan style raster default/custom: {e}")
 
         wms_base = settings.GEOSERVER_WMS_URL
         return {

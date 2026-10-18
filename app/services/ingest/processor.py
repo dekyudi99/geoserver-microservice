@@ -15,7 +15,7 @@ import geopandas as gpd
 from shapely.geometry import MultiPolygon, MultiLineString, MultiPoint, Polygon, LineString, Point
 
 from app.config.settings import settings
-from app.config.database import engine
+from app.config.database import engine, spatial_engine
 from app.clients.geoserver_client import geoserver_client
 from app.models.ingest_job import IngestJob
 from app.models.spatial_data import VectorLayer, RasterMetadata
@@ -377,19 +377,19 @@ class IngestProcessor:
 
         staging_table_name = f"staging_{uuid.uuid4().hex[:10]}"
         try:
-            gdf.to_postgis(name=staging_table_name, con=engine, if_exists="replace", index=False)
-            with engine.begin() as conn:
+            gdf.to_postgis(name=staging_table_name, con=spatial_engine, if_exists="replace", index=False)
+            with spatial_engine.begin() as conn:
                 conn.execute(text(f"""
                     DROP TABLE IF EXISTS "{geoserver_name}" CASCADE;
                     ALTER TABLE "{staging_table_name}" RENAME TO "{geoserver_name}";
                     CREATE INDEX "idx_{geoserver_name}_geom" ON "{geoserver_name}" USING GIST (geometry);
                 """))
             # ANALYZE agar GeoServer memakai estimated extent (tanpa full scan) saat publish.
-            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            with spatial_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
                 conn.execute(text(f'ANALYZE "{geoserver_name}"'))
         except Exception as db_err:
             try:
-                with engine.begin() as conn:
+                with spatial_engine.begin() as conn:
                     conn.execute(text(f'DROP TABLE IF EXISTS "{staging_table_name}" CASCADE;'))
             except Exception:
                 pass

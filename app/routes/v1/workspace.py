@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from ...clients.geoserver_client import geoserver_client
 from ...schemas.v1.spatial_data import WorkspaceCreateRequest
-from ...config.database import get_db, engine
+from ...config.database import get_db, engine, spatial_engine
 from ...security.auth import get_verified_key
 from ...security.rate_limiter import rate_limit
 from ...models.spatial_data import WorkspaceMetadata, VectorLayer, RasterMetadata, LayerGroupMetadata
@@ -105,6 +105,121 @@ def get_workspace(
         "visibility": meta.visibility if meta else "private",
         "created_at": meta.created_at.isoformat() if meta and meta.created_at else None,
     }
+
+@router.get(
+    "/{identifier}/layers",
+    dependencies=[Depends(rate_limit("read"))]
+)
+def get_workspace_layers(
+    identifier: str,
+    layer_type: Optional[str] = Query(None, description="Filter tipe layer: 'vector' atau 'raster'"),
+    include_geoserver: bool = Query(False, description="Sertakan juga daftar raw layer langsung dari GeoServer REST API"),
+    db: Session = Depends(get_db),
+    key = Depends(get_verified_key)
+):
+    """
+    Mengambil semua data layer di dalam workspace tertentu.
+    Mendukung identifier berupa Hashed ID atau nama teknis GeoServer.
+    """
+    from .layer import _detect_file_format
+
+    meta = resolve_workspace(db, identifier)
+    ws_name = meta.workspace_name if meta else identifier
+
+    is_primary = getattr(key, "key_type", None) == ApiKeyType.PRIMARY
+    if meta and not is_primary and meta.api_key_id != key.id:
+        raise HTTPException(status_code=403, detail="Anda tidak memiliki akses ke workspace ini.")
+
+    ws_geo = geoserver_client.get_workspace(ws_name)
+    if not ws_geo and not meta:
+        raise HTTPException(status_code=404, detail=f"Workspace '{identifier}' tidak ditemukan.")
+
+    result = []
+    if layer_type != "raster":
+        vec_q = db.query(VectorLayer).filter(VectorLayer.workspace_name == ws_name)
+        if not is_primary and meta and meta.api_key_id:
+            vec_q = vec_q.filter(VectorLayer.api_key_id == key.id)
+        vectors = vec_q.order_by(VectorLayer.created_at.desc()).all()
+        for v in vectors:
+            v_fmt = v.file_format or _detect_file_format(v.file_path, "shp")
+            result.append({
+                "id": str(v.id),
+                "type": "vector",
+                "layer_type": "vector",
+                "data_type": v_fmt,
+                "file_format": v_fmt,
+                "workspace_name": ws_name,
+                "table_name": v.table_name,
+                "geoserver_name": v.table_name,
+                "layer_name": v.layer_name,
+                "display_name": v.layer_name,
+                "geom_type": v.geom_type,
+                "geometry_type": v.geom_type,
+                "feature_count": v.feature_count,
+                "bbox": v.bbox,
+                "srid": v.srid or 4326,
+                "epsg": v.srid or 4326,
+                "wms_url": v.wms_url,
+                "wms_layers_param": f"{ws_name}:{v.table_name}",
+                "symbology": v.symbology,
+                "style_name": v.symbology.get("style_name") if isinstance(v.symbology, dict) else None,
+                "created_at": str(v.created_at)
+            })
+
+    if layer_type != "vector":
+        ras_q = db.query(RasterMetadata).filter(RasterMetadata.workspace_name == ws_name)
+        if not is_primary and meta and meta.api_key_id:
+            ras_q = ras_q.filter(RasterMetadata.api_key_id == key.id)
+        rasters = ras_q.order_by(RasterMetadata.created_at.desc()).all()
+        for r in rasters:
+            r_fmt = _detect_file_format(r.file_path, "tif")
+            result.append({
+                "id": str(r.id),
+                "type": "raster",
+                "layer_type": "raster",
+                "data_type": r_fmt,
+                "file_format": r_fmt,
+                "workspace_name": ws_name,
+                "store_name": r.store_name,
+                "geoserver_name": r.store_name,
+                "layer_name": r.layer_name,
+                "display_name": r.layer_name,
+                "bbox": r.bbox,
+                "dimensions": r.dimensions,
+                "epsg": r.epsg or 4326,
+                "wms_url": r.wms_url,
+                "wms_layers_param": f"{ws_name}:{r.store_name}",
+                "symbology": r.symbology,
+                "style_name": r.symbology.get("style_name") if isinstance(r.symbology, dict) else None,
+                "created_at": str(r.created_at)
+            })
+
+    hashed_id = encode_id(meta.raw_id) if meta and meta.raw_id is not None else ws_name
+    for item in result:
+        item["workspace_id"] = hashed_id
+        item["workspace_hashed_id"] = hashed_id
+        item["workspace_display_name"] = meta.display_name if meta else ws_name
+
+    result.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+
+    resp = {
+        "success": True,
+        "workspace": {
+            "id": hashed_id,
+            "hashed_id": hashed_id,
+            "raw_id": meta.raw_id if meta else None,
+            "workspace_name": ws_name,
+            "ws_name": ws_name,
+            "display_name": meta.display_name if meta else ws_name
+        },
+        "total": len(result),
+        "data": result
+    }
+
+    if include_geoserver:
+        resp["geoserver_layers"] = geoserver_client.get_layers(workspace_name=ws_name)
+
+    return resp
 
 @router.post(
     "",
@@ -204,7 +319,7 @@ def delete_workspace(
         vec_layers = db.query(VectorLayer).filter(VectorLayer.workspace_name == ws_name).all()
         for vec in vec_layers:
             try:
-                with engine.begin() as conn:
+                with spatial_engine.begin() as conn:
                     conn.execute(text(f'DROP TABLE IF EXISTS "{vec.table_name}" CASCADE;'))
             except Exception as e:
                 logger.warning(f"Drop table {vec.table_name} warning: {e}")

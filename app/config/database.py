@@ -12,6 +12,13 @@ engine = create_engine(
     max_overflow=20
 )
 
+spatial_engine = create_engine(
+    settings.SPATIAL_DATABASE_URL,
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20
+)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -25,7 +32,7 @@ def get_db():
 def ensure_postgis_extension():
     """Memastikan ekstensi PostGIS aktif di database spatial."""
     try:
-        with engine.begin() as conn:
+        with spatial_engine.begin() as conn:
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis;"))
             logger.info("PostGIS extension ensured in spatial DB.")
     except Exception as e:

@@ -267,7 +267,9 @@ class StyleService:
         sld_xml: Optional[str] = None
     ) -> bool:
         if sld_xml:
-            geoserver_client.create_or_update_style(style_name, sld_xml)
+            sld_ok = geoserver_client.create_or_update_style(style_name, sld_xml)
+            if not sld_ok:
+                return False
         return geoserver_client.assign_style_to_layer(workspace, layer_name, style_name)
 
 style_service = StyleService()

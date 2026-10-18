@@ -6,13 +6,13 @@ import os
 import shutil
 import uuid
 import json
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends, Query
 from sqlalchemy.orm import Session
 from typing import Optional, Dict, Any
 from ...services.vector_service import vector_service
 from ...services.raster_service import raster_service
 from ...clients.geoserver_client import geoserver_client
-from ...config.database import get_db, engine
+from ...config.database import get_db, engine, spatial_engine
 from sqlalchemy import text
 from ...config.settings import settings
 from ...schemas.v1.spatial_data import VectorPublishResponse, RasterPublishResponse
@@ -228,6 +228,9 @@ async def publish_raster(
         )
 
         return RasterPublishResponse(
+            id=str(raster_meta.id),
+            layer_id=str(raster_meta.id),
+            layer_name=layer_name,
             success=True,
             workspace_name=actual_ws_name,
             store_name=final_store_name,
@@ -269,22 +272,47 @@ def _detect_file_format(file_path: Optional[str], default_format: str) -> str:
     return default_format
 
 @router.get(
+    "",
+    dependencies=[Depends(rate_limit("read"))]
+)
+def list_layers(
+    layer_type: Optional[str] = Query(None, description="Filter 'vector' atau 'raster'"),
+    workspace: Optional[str] = Query(None, description="Filter berdasarkan nama teknis atau hashed ID workspace"),
+    db: Session = Depends(get_db),
+    caller: ApiKey = Depends(require_any_key)
+):
+    """
+    Mengambil semua data layer (opsional difilter berdasarkan workspace atau layer_type).
+    """
+    return get_my_layers(layer_type=layer_type, workspace=workspace, db=db, caller=caller)
+
+@router.get(
     "/my-layers",
     dependencies=[Depends(rate_limit("read"))]
 )
 def get_my_layers(
     layer_type: Optional[str] = None,
+    workspace: Optional[str] = Query(None, description="Filter berdasarkan nama teknis atau hashed ID workspace"),
     db: Session = Depends(get_db),
     caller: ApiKey = Depends(require_any_key)
 ):
     """
     Mengambil semua data layer milik API Key yang sedang memanggil.
+    Mendukung filter opsional berdasarkan workspace_name atau hashed ID workspace.
     Menjamin isolasi kepemilikan data antar akun/sistem eksternal.
     Urutan default: data terbaru di awal (created_at DESC).
     """
+    ws_filter_name = None
+    if workspace:
+        ws_meta = resolve_workspace(db, workspace)
+        ws_filter_name = ws_meta.workspace_name if ws_meta else workspace
+
     result = []
     if layer_type != "raster":
-        vectors = db.query(VectorLayer).filter(VectorLayer.api_key_id == caller.id).order_by(VectorLayer.created_at.desc()).all()
+        vec_q = db.query(VectorLayer).filter(VectorLayer.api_key_id == caller.id)
+        if ws_filter_name:
+            vec_q = vec_q.filter(VectorLayer.workspace_name == ws_filter_name)
+        vectors = vec_q.order_by(VectorLayer.created_at.desc()).all()
         for v in vectors:
             v_fmt = v.file_format or _detect_file_format(v.file_path, "shp")
             result.append({
@@ -311,7 +339,10 @@ def get_my_layers(
                 "created_at": str(v.created_at)
             })
     if layer_type != "vector":
-        rasters = db.query(RasterMetadata).filter(RasterMetadata.api_key_id == caller.id).order_by(RasterMetadata.created_at.desc()).all()
+        ras_q = db.query(RasterMetadata).filter(RasterMetadata.api_key_id == caller.id)
+        if ws_filter_name:
+            ras_q = ras_q.filter(RasterMetadata.workspace_name == ws_filter_name)
+        rasters = ras_q.order_by(RasterMetadata.created_at.desc()).all()
         for r in rasters:
             r_fmt = _detect_file_format(r.file_path, "tif")
             result.append({
@@ -347,6 +378,7 @@ def get_my_layers(
     result.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
 
     return {"total": len(result), "data": result}
+
 
 
 def _is_valid_uuid(val: str) -> bool:
@@ -398,7 +430,7 @@ def batch_delete_layers(
                     pass
                 # Hapus tabel PostGIS
                 try:
-                    with engine.begin() as conn:
+                    with spatial_engine.begin() as conn:
                         conn.execute(text(f'DROP TABLE IF EXISTS "{vec.table_name}" CASCADE;'))
                 except Exception:
                     pass
@@ -554,7 +586,7 @@ def delete_layer(
             logger.warning(f"GeoServer delete_feature_type vector notice: {e}")
 
         try:
-            with engine.begin() as conn:
+            with spatial_engine.begin() as conn:
                 conn.execute(text(f'DROP TABLE IF EXISTS "{vec.table_name}" CASCADE;'))
         except Exception as e:
             logger.warning(f"PostGIS drop table notice: {e}")

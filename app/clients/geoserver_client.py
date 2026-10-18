@@ -279,7 +279,10 @@ class GeoServerClient:
             headers={"Content-Type": "application/vnd.ogc.sld+xml"},
             data=sld_xml.encode("utf-8")
         )
-        return res.status_code in (200, 201)
+        if res.status_code not in (200, 201):
+            logger.error(f"GeoServer failed to save SLD body for style '{clean_name}': HTTP {res.status_code} - {res.text}")
+            return False
+        return True
 
     def assign_style_to_layer(self, workspace_name: str, layer_name: str, style_name: str) -> bool:
         clean_style = os.path.splitext(style_name)[0].replace('.', '_')
@@ -329,6 +332,25 @@ class GeoServerClient:
         if res.status_code == 200:
             return res.json().get("layer", {})
         return None
+
+    def get_layers(self, workspace_name: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Mengambil daftar layer dari GeoServer REST API.
+        Jika workspace_name diisi, mengambil layer khusus untuk workspace tersebut:
+        GET /rest/workspaces/{workspace_name}/layers.json
+        Jika tidak diisi, mengambil seluruh layer global:
+        GET /rest/layers.json
+        """
+        path = f"/rest/workspaces/{workspace_name}/layers.json" if workspace_name else "/rest/layers.json"
+        res = self._request("GET", path)
+        if res.status_code == 200:
+            try:
+                return self._extract_list(res.json(), "layers", "layer")
+            except Exception as e:
+                logger.warning(f"Error parsing layers json for workspace '{workspace_name}': {e}")
+                return []
+        return []
+
 
     def get_version(self) -> Dict[str, Any]:
         res = self._request("GET", "rest/about/version.json")

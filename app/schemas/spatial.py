@@ -37,6 +37,9 @@ class VectorPublishResponse(BaseModel):
     wms_url: str
 
 class RasterPublishResponse(BaseModel):
+    id: Optional[str] = None
+    layer_id: Optional[str] = None
+    layer_name: Optional[str] = None
     success: bool
     workspace_name: str
     store_name: str

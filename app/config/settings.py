@@ -15,19 +15,53 @@ class Settings:
     GEOSERVER_PASS: str = os.getenv("GEOSERVER_PASS", "geoserver")
     GEOSERVER_WMS_URL: str = os.getenv("GEOSERVER_WMS_URL", "http://localhost:8080/geoserver").rstrip("/")
 
-    # PostGIS GeoServer Spatial DB
-    POSTGIS_HOST: str = os.getenv("POSTGIS_HOST", "postgis")
-    POSTGIS_PORT: int = int(os.getenv("POSTGIS_PORT", "5432"))
-    POSTGIS_DB: str = os.getenv("POSTGIS_DB", "geoserver_spatial_db")
-    POSTGIS_USER: str = os.getenv("POSTGIS_USER", "postgres")
-    POSTGIS_PASSWORD: str = os.getenv("POSTGIS_PASSWORD", "")
+    # Central Database 1: Auth & User Metadata DB (voxagis_user)
+    DB_HOST: str = os.getenv("DB_HOST", "db-central-postgres")
+    DB_PORT: int = int(os.getenv("DB_PORT", "5432"))
+    DB_NAME: str = os.getenv("DB_NAME", "voxagis_user")
+    DB_USER: str = os.getenv("DB_USER", "voxagis_app")
+    DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
 
     @property
     def DATABASE_URL(self) -> str:
         env_url = os.getenv("DATABASE_URL")
         if env_url:
             return env_url
-        return f"postgresql://{self.POSTGIS_USER}:{self.POSTGIS_PASSWORD}@{self.POSTGIS_HOST}:{self.POSTGIS_PORT}/{self.POSTGIS_DB}"
+        return f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+
+    # Central Database 2: Spatial PostGIS & GeoServer Datastore (spatial)
+    SPATIAL_DB_HOST: str = os.getenv("SPATIAL_DB_HOST", os.getenv("POSTGIS_HOST", "db-central-postgres"))
+    SPATIAL_DB_PORT: int = int(os.getenv("SPATIAL_DB_PORT", os.getenv("POSTGIS_PORT", "5432")))
+    SPATIAL_DB_NAME: str = os.getenv("SPATIAL_DB_NAME", os.getenv("POSTGIS_DB", "spatial"))
+    SPATIAL_DB_USER: str = os.getenv("SPATIAL_DB_USER", os.getenv("POSTGIS_USER", "geoserver_svc"))
+    SPATIAL_DB_PASSWORD: str = os.getenv("SPATIAL_DB_PASSWORD", os.getenv("POSTGIS_PASSWORD", ""))
+
+    @property
+    def POSTGIS_HOST(self) -> str:
+        return self.SPATIAL_DB_HOST
+
+    @property
+    def POSTGIS_PORT(self) -> int:
+        return self.SPATIAL_DB_PORT
+
+    @property
+    def POSTGIS_DB(self) -> str:
+        return self.SPATIAL_DB_NAME
+
+    @property
+    def POSTGIS_USER(self) -> str:
+        return self.SPATIAL_DB_USER
+
+    @property
+    def POSTGIS_PASSWORD(self) -> str:
+        return self.SPATIAL_DB_PASSWORD
+
+    @property
+    def SPATIAL_DATABASE_URL(self) -> str:
+        env_url = os.getenv("SPATIAL_DATABASE_URL")
+        if env_url:
+            return env_url
+        return f"postgresql://{self.SPATIAL_DB_USER}:{self.SPATIAL_DB_PASSWORD}@{self.SPATIAL_DB_HOST}:{self.SPATIAL_DB_PORT}/{self.SPATIAL_DB_NAME}"
 
     # Storage Paths
     DATA_RASTER_PATH: str = os.getenv("DATA_RASTER_PATH", "/data_raster")

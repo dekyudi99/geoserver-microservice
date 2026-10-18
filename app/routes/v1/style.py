@@ -170,17 +170,21 @@ def apply_style(
             raise HTTPException(status_code=502, detail="GeoServer gagal menerapkan style ke layer.")
 
         updated_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        if layer_kind == "raster" and req.colors:
-            raster_obj.symbology = {
-                "layer_kind": "raster",
-                "classes": req.colors,
-                "style_type": req.style_type,
-                "classification_method": req.classification_method,
-                "classes_count": req.classes_count or len(req.colors),
-                "color_ramp": req.color_ramp,
-                "style_name": st_name,
-                "updated_at": updated_at
-            }
+        if layer_kind == "raster":
+            parsed_sld = style_service.parse_raster_sld(sld_xml) if sld_xml else None
+            classes = req.colors or (parsed_sld.get("entries") if parsed_sld else None)
+            st_type = req.style_type or (parsed_sld.get("style_type") if parsed_sld else "intervals")
+            if classes:
+                raster_obj.symbology = {
+                    "layer_kind": "raster",
+                    "classes": classes,
+                    "style_type": st_type,
+                    "classification_method": req.classification_method or "custom",
+                    "classes_count": req.classes_count or len(classes),
+                    "color_ramp": req.color_ramp or "custom",
+                    "style_name": st_name,
+                    "updated_at": updated_at
+                }
         elif layer_kind == "vector":
             vector_obj.symbology = {
                 "layer_kind": "vector",
