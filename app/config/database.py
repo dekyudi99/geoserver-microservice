@@ -55,6 +55,10 @@ def create_all_tables():
                 "ALTER TABLE IF EXISTS vector_layers "
                 "ADD COLUMN IF NOT EXISTS file_format VARCHAR(20);"
             ))
+            # Hapus kolom wms_url yang sudah tidak digunakan (digantikan WMS URL dinamis)
+            conn.execute(text("ALTER TABLE IF EXISTS vector_layers DROP COLUMN IF EXISTS wms_url;"))
+            conn.execute(text("ALTER TABLE IF EXISTS raster_metadata DROP COLUMN IF EXISTS wms_url;"))
+            conn.execute(text("ALTER TABLE IF EXISTS layer_groups DROP COLUMN IF EXISTS wms_url;"))
             # Buat fungsi trigger untuk auto-update kolom updated_at pada level PostgreSQL
             conn.execute(text("""
                 CREATE OR REPLACE FUNCTION update_updated_at_column()

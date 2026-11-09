@@ -24,6 +24,29 @@ from ...security.rate_limiter import rate_limit
 from ...services.audit_service import log_action
 from ...models.ingest_job import IngestJob
 from .api_keys import get_disk_usage_for_key, MAX_SPATIAL_QUOTA_BYTES
+from dotenv import load_dotenv
+
+load_dotenv()
+
+def build_dynamic_wms_url(workspace_name: str, layer_name: Optional[str] = None) -> str:
+    """
+    Menghasilkan WMS URL dinamis berbasis environment variable GEOSERVER_WMS_URL.
+    Menggabungkan domain base dari .env dengan nama workspace sehingga sistem dapat
+    berganti domain WMS secara dinamis (localhost, ngrok/tunnel, VPS production)
+    tanpa terikat URL statis yang tersimpan di database.
+    """
+    base_wms = os.getenv("GEOSERVER_WMS_URL") or getattr(settings, "GEOSERVER_WMS_URL", None) or "http://localhost:8080/geoserver"
+    base_wms = str(base_wms).rstrip("/")
+    if base_wms.endswith("/wms"):
+        base_wms = base_wms[:-4].rstrip("/")
+    return f"{base_wms}/{workspace_name}/wms"
+
+def build_dynamic_layer_wms_url(workspace_name: str, layer_name: str) -> str:
+    """
+    Menghasilkan URL direct GetMap lengkap yang menggabungkan base WMS, workspace, dan layer.
+    """
+    wms_endpoint = build_dynamic_wms_url(workspace_name, layer_name)
+    return f"{wms_endpoint}?service=WMS&version=1.1.1&request=GetMap&layers={workspace_name}:{layer_name}&format=image/png&transparent=true"
 
 logger = logging.getLogger("geoserver_service.v1_layer")
 
@@ -104,7 +127,7 @@ async def publish_vector(
             bbox=res.get("bbox"),
             srid=res.get("srid"),
             file_path=saved_path,
-            wms_url=res.get("wms_url")
+
         )
         db.add(vector_layer)
         db.commit()
@@ -130,7 +153,8 @@ async def publish_vector(
             bbox=res["bbox"],
             srid=res["srid"],
             simplification=stats,
-            wms_url=res["wms_url"]
+            wms_url=build_dynamic_wms_url(actual_ws_name, final_table_name)
+
         )
     except Exception as e:
         log_action(
@@ -211,7 +235,7 @@ async def publish_raster(
             bbox=res.get("bbox"),
             dimensions=res.get("dimensions"),
             file_path=saved_path,
-            wms_url=res.get("wms_url"),
+
             symbology=res.get("symbology")
         )
         db.add(raster_meta)
@@ -238,7 +262,8 @@ async def publish_raster(
             epsg=res["epsg"],
             bbox=res["bbox"],
             dimensions=res["dimensions"],
-            wms_url=res["wms_url"],
+            wms_url=build_dynamic_wms_url(actual_ws_name, final_store_name),
+
             symbology=res.get("symbology")
         )
     except Exception as e:
@@ -332,7 +357,8 @@ def get_my_layers(
                 "bbox": v.bbox,
                 "srid": v.srid or 4326,
                 "epsg": v.srid or 4326,
-                "wms_url": v.wms_url,
+                "wms_url": build_dynamic_wms_url(v.workspace_name, v.table_name),
+                "direct_wms_url": build_dynamic_layer_wms_url(v.workspace_name, v.table_name),
                 "wms_layers_param": f"{v.workspace_name}:{v.table_name}",
                 "symbology": v.symbology,
                 "style_name": v.symbology.get("style_name") if isinstance(v.symbology, dict) else None,
@@ -359,7 +385,8 @@ def get_my_layers(
                 "bbox": r.bbox,
                 "dimensions": r.dimensions,
                 "epsg": r.epsg or 4326,
-                "wms_url": r.wms_url,
+                "wms_url": build_dynamic_wms_url(r.workspace_name, r.store_name),
+                "direct_wms_url": build_dynamic_layer_wms_url(r.workspace_name, r.store_name),
                 "wms_layers_param": f"{r.workspace_name}:{r.store_name}",
                 "symbology": r.symbology,
                 "style_name": r.symbology.get("style_name") if isinstance(r.symbology, dict) else None,

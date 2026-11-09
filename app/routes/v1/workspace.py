@@ -15,6 +15,7 @@ from ...models.spatial_data import WorkspaceMetadata, VectorLayer, RasterMetadat
 from ...models.ingest_job import IngestJob
 from ...models.api_key import ApiKeyType
 from ...services.hash_id import encode_id, decode_id, resolve_workspace
+from .layer import build_dynamic_wms_url
 
 logger = logging.getLogger("geoserver_service.workspace")
 router = APIRouter(prefix="/workspaces", tags=["Workspaces"])
@@ -159,7 +160,7 @@ def get_workspace_layers(
                 "bbox": v.bbox,
                 "srid": v.srid or 4326,
                 "epsg": v.srid or 4326,
-                "wms_url": v.wms_url,
+                "wms_url": build_dynamic_wms_url(ws_name, v.table_name),
                 "wms_layers_param": f"{ws_name}:{v.table_name}",
                 "symbology": v.symbology,
                 "style_name": v.symbology.get("style_name") if isinstance(v.symbology, dict) else None,
@@ -187,7 +188,7 @@ def get_workspace_layers(
                 "bbox": r.bbox,
                 "dimensions": r.dimensions,
                 "epsg": r.epsg or 4326,
-                "wms_url": r.wms_url,
+                "wms_url": build_dynamic_wms_url(ws_name, r.store_name),
                 "wms_layers_param": f"{ws_name}:{r.store_name}",
                 "symbology": r.symbology,
                 "style_name": r.symbology.get("style_name") if isinstance(r.symbology, dict) else None,

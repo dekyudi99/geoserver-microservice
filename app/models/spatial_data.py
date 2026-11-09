@@ -22,7 +22,6 @@ class VectorLayer(TimestampMixin, Base):
     srid = Column(Integer, nullable=True)
     file_path = Column(Text, nullable=True)
     file_format = Column(String(20), nullable=True)  # geojson, shp, kml, kmz, csv
-    wms_url = Column(Text, nullable=True)
     symbology = Column(JSON, nullable=True)
 
 class RasterMetadata(TimestampMixin, Base):
@@ -41,7 +40,6 @@ class RasterMetadata(TimestampMixin, Base):
     bbox = Column(JSON, nullable=True)
     dimensions = Column(JSON, nullable=True)
     file_path = Column(Text, nullable=True)
-    wms_url = Column(Text, nullable=True)
     symbology = Column(JSON, nullable=True)
 
 
@@ -74,6 +72,5 @@ class LayerGroupMetadata(TimestampMixin, Base):
     abstract_text = Column(Text, nullable=True)
     mode = Column(String(50), default="single")
     layer_ids = Column(JSON, default=list)
-    wms_url = Column(Text, nullable=True)
     wms_layers_param = Column(Text, nullable=True)
     bbox = Column(JSON, nullable=True)

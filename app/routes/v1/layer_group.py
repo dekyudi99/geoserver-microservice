@@ -9,6 +9,7 @@ from ...config.settings import settings
 from ...models.api_key import ApiKey
 from ...models.spatial_data import LayerGroupMetadata, WorkspaceMetadata, VectorLayer, RasterMetadata
 from ...services.hash_id import encode_id, decode_id, resolve_workspace
+from .layer import build_dynamic_wms_url
 from ...clients.geoserver_client import geoserver_client
 from ...security.auth import require_any_key
 from ...services.audit_service import log_action
@@ -168,7 +169,7 @@ def create_layer_group(
         layer_names=layer_names_for_geoserver
     )
 
-    wms_url = f"{settings.GEOSERVER_WMS_URL}/{ws_name}/wms"
+    wms_url = build_dynamic_wms_url(ws_name)
     wms_layers_param = f"{ws_name}:{payload.name}"
 
     group_obj = LayerGroupMetadata(
@@ -179,7 +180,6 @@ def create_layer_group(
         abstract_text=payload.abstract_text,
         mode=payload.mode,
         layer_ids=payload.layer_ids,
-        wms_url=wms_url,
         wms_layers_param=wms_layers_param,
         bbox=combined_bbox
     )
@@ -205,7 +205,7 @@ def create_layer_group(
             "name": group_obj.name,
             "title": group_obj.title,
             "workspace_name": group_obj.workspace_name,
-            "wms_url": group_obj.wms_url,
+            "wms_url": build_dynamic_wms_url(group_obj.workspace_name),
             "wms_layers_param": group_obj.wms_layers_param,
             "bbox": group_obj.bbox,
             "layer_count": len(payload.layer_ids),
@@ -257,7 +257,7 @@ def list_layer_groups(
             "workspace_id": encode_id(ws_map.get(g.workspace_name).raw_id) if ws_map.get(g.workspace_name) and ws_map.get(g.workspace_name).raw_id is not None else g.workspace_name,
             "workspace_hashed_id": encode_id(ws_map.get(g.workspace_name).raw_id) if ws_map.get(g.workspace_name) and ws_map.get(g.workspace_name).raw_id is not None else g.workspace_name,
             "mode": g.mode or "single",
-            "wms_url": g.wms_url,
+            "wms_url": build_dynamic_wms_url(g.workspace_name),
             "wms_layers_param": g.wms_layers_param,
             "bbox": effective_bbox,
             "layer_count": len(lids),
@@ -299,7 +299,7 @@ def get_layer_group_detail(
             "workspace_id": group_obj.workspace_name,
             "workspace_name": group_obj.workspace_name,
             "mode": group_obj.mode or "single",
-            "wms_url": group_obj.wms_url,
+            "wms_url": build_dynamic_wms_url(group_obj.workspace_name),
             "wms_layers_param": group_obj.wms_layers_param,
             "bbox": group_obj.bbox or combined_bbox,
             "layer_count": len(lids),

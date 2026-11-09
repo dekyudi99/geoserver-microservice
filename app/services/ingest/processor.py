@@ -183,7 +183,7 @@ class IngestProcessor:
             epsg=epsg,
             bbox=bbox_dict,
             dimensions={"width": width, "height": height, "bands": count},
-            wms_url=wms_url
+
         )
         db.add(raster_meta)
         db.commit()
@@ -454,7 +454,7 @@ class IngestProcessor:
             srid=4326,
             file_format=file_type_format.lower(),
             symbology=symbology_meta,
-            wms_url=wms_url
+
         )
         db.add(vec_layer)
         db.commit()
