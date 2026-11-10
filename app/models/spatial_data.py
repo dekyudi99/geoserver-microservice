@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Integer, Text, JSON, Sequence, FetchedValue
+from sqlalchemy import Column, String, Integer, Text, JSON, Sequence, FetchedValue, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from ..config.database import Base
 from .mixins import TimestampMixin
@@ -23,6 +23,8 @@ class VectorLayer(TimestampMixin, Base):
     file_path = Column(Text, nullable=True)
     file_format = Column(String(20), nullable=True)  # geojson, shp, kml, kmz, csv
     symbology = Column(JSON, nullable=True)
+    service_mode = Column(String(10), nullable=False, default="wms", server_default="wms")  # "wms" | "wmts"
+    gwc_ready = Column(Boolean, nullable=False, default=False, server_default="false")
 
 class RasterMetadata(TimestampMixin, Base):
     """
@@ -41,6 +43,8 @@ class RasterMetadata(TimestampMixin, Base):
     dimensions = Column(JSON, nullable=True)
     file_path = Column(Text, nullable=True)
     symbology = Column(JSON, nullable=True)
+    service_mode = Column(String(10), nullable=False, default="wms", server_default="wms")  # "wms" | "wmts"
+    gwc_ready = Column(Boolean, nullable=False, default=False, server_default="false")
 
 
 class WorkspaceMetadata(TimestampMixin, Base):

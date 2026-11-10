@@ -1,0 +1,12 @@
+{
+  "python.defaultInterpreterPath": "C:\\Users\\USER\\AppData\\Local\\Python\\bin\\python.exe",
+  "python.pyrefly.configPath": "${workspaceFolder}/pyrefly.toml",
+  "python.analysis.extraPaths": [
+    "./app"
+  ],
+  "python.analysis.diagnosticSeverityOverrides": {
+    "reportMissingImports": "none",
+    "reportMissingModuleSource": "none"
+  }
+}
+

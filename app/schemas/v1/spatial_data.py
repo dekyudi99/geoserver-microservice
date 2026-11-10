@@ -56,3 +56,67 @@ class LayerInfoResponse(BaseModel):
     type: str  # 'vector' | 'raster'
     wms_url: str
     bbox: Optional[Dict[str, float]] = None
+
+# ============================================================================
+# WFS 2.0.0 Feature Data Schemas (Schema, Query, Identify)
+# ============================================================================
+
+class FeatureFilterItem(BaseModel):
+    field: str
+    op: str
+    value: Optional[Any] = None
+
+class FeatureSortItem(BaseModel):
+    field: str
+    dir: Optional[str] = "ASC"
+
+class FeatureQueryRequest(BaseModel):
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=50, ge=1, le=500)
+    sort: Optional[List[FeatureSortItem]] = None
+    filters: Optional[List[FeatureFilterItem]] = None
+    bbox: Optional[List[float]] = None
+
+class ColumnSchemaItem(BaseModel):
+    name: str
+    type: str
+    local_type: str
+    nillable: bool
+    is_geometry: bool
+    is_pk: bool
+    hidden: bool = False
+
+class LayerSchemaResponse(BaseModel):
+    layer_id: str
+    table_name: str
+    workspace_name: str
+    geom_type: Optional[str] = None
+    geom_column: str = "geometry"
+    has_pk: bool
+    pk_column: Optional[str] = None
+    columns: List[ColumnSchemaItem]
+
+class FeatureQueryRow(BaseModel):
+    fid: str
+    properties: Dict[str, Any]
+
+class FeatureQueryResponse(BaseModel):
+    layer_id: str
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    columns: List[str]
+    rows: List[FeatureQueryRow]
+
+class FeatureIdentifyRequest(BaseModel):
+    lng: float
+    lat: float
+    zoom: float
+    tolerance_px: Optional[float] = 8.0
+
+class FeatureIdentifyResponse(BaseModel):
+    layer_id: str
+    layer_name: str
+    count: int
+    features: List[Dict[str, Any]]

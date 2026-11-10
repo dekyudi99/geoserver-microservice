@@ -2,11 +2,24 @@ import html
 import math
 import os
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from ..clients.geoserver_client import geoserver_client
 import logging
 
 logger = logging.getLogger("geoserver_service.style")
+
+class ApplyStyleResult(dict):
+    """
+    Hasil eksekusi apply_style.
+    Berfungsi sebagai dict sekaligus boolean (True jika success=True, False jika success=False)
+    agar kompatibel dengan pemanggil lama maupun router baru.
+    """
+    @property
+    def success(self) -> bool:
+        return bool(self.get("success", False))
+
+    def __bool__(self) -> bool:
+        return self.success
 
 class StyleService:
     """
@@ -21,27 +34,98 @@ class StyleService:
     ) -> str:
         """
         Generate SLD 1.0.0 XML untuk Raster Layer.
-        style_type: 'values' (kategori diskrit), 'intervals' (rentang kelas), atau 'ramp' (gradien mulus)
+        style_type: 'values' (kategori diskrit), 'intervals' (rentang kelas), atau 'ramp' (gradien mulus).
+        
+        Catatan: Tipe 'ramp_exact' tidak didukung oleh spesifikasi OGC SLD 1.0.0 (OGC 02-070)
+        maupun implementasi GeoServer ColorMap (GeoServer hanya mendukung 'ramp', 'intervals', 'values'),
+        sehingga sengaja ditolak demi integritas SLD dan mencegah runtime error pada GeoServer.
+
+        Semantik Batas Kelas SLD GeoServer vs UI AstraGIS:
+        1. Semantik GeoServer 2.28+:
+           Pada ColorMap type='intervals', GeoServer mengevaluasi setiap ColorMapEntry sebagai interval [Q_{i-1}, Q_i).
+           Artinya: batas bawah adalah INKLUSIF (>= Q_{i-1}) dan batas atas adalah EKSKLUSIF (< Q_i).
+        2. Semantik UI AstraGIS dan Legenda:
+           UI mendefinisikan kelas i sebagai rentang (B_{i-1}, B_i] di mana batas atas adalah INKLUSIF (<= B_i)
+           dan batas bawah adalah EKSKLUSIF (> B_{i-1}), kecuali kelas pertama yang mencakup nilai minimum raster.
+        3. Mekanisme Penyesuaian (Infinitesimal Shift):
+           Agar semantik WMS GetMap GeoServer cocok persis dengan UI:
+           Untuk type='intervals', quantity pada SEMUA ColorMapEntry di XML dinaikkan secara infinitesimal
+           menggunakan math.nextafter(q, math.inf).
+           Dengan demikian, untuk piksel dengan nilai x == B_i, karena x < math.nextafter(B_i, math.inf),
+           piksel x == B_i tepat masuk ke kelas i (bukan melompat ke kelas i+1 atau menjadi transparan pada max).
+        4. Transparansi & Round-trip:
+           SLD yang dihasilkan diberi penanda <Abstract>astra:upper_inclusive=1</Abstract> di dalam <UserStyle>.
+           Parser (parse_raster_sld) mendeteksi penanda ini dan membalikkan penyesuaian dengan
+           math.nextafter(q, -math.inf), sehingga nilai yang tersimpan di symbology/API dan dibaca kembali
+           selalu merupakan nilai batas asli tanpa pergeseran angka. Jika penanda tidak ada, nilai dikembalikan
+           apa adanya dan boundary_semantics ditandai sebagai 'unknown'.
         """
-        if style_type not in {"intervals", "values", "ramp", "ramp_exact"}:
-            raise ValueError("style_type raster tidak didukung.")
+        if not color_entries:
+            raise ValueError("color_entries tidak boleh kosong.")
+        if len(color_entries) > 256:
+            raise ValueError("Style raster maksimal memiliki 256 kelas.")
+
+        if style_type not in {"intervals", "values", "ramp"}:
+            raise ValueError(f"style_type raster '{style_type}' tidak didukung. Harus salah satu dari: intervals, values, ramp.")
+
         entries_xml = ""
         safe_style_name = html.escape(str(style_name), quote=True)
-        for entry in color_entries:
-            q = entry.get("quantity", 0)
-            c = entry.get("color", "#000000")
-            op = entry.get("opacity", 1.0)
-            lbl = html.escape(str(entry.get("label", f"Class {q}")), quote=True)
+
+        prev_quantity = None
+        seen_values = set()
+
+        for idx, entry in enumerate(color_entries):
+            c = entry.get("color")
             if not isinstance(c, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", c):
-                raise ValueError("Warna raster harus berupa HEX #RRGGBB.")
+                raise ValueError(f"Entri ke-{idx} memiliki warna yang tidak valid: '{c}'. Harus berupa HEX #RRGGBB.")
+
+            q = entry.get("quantity")
+            if q is None:
+                raise ValueError(f"Entri ke-{idx} tidak memiliki atribut 'quantity'.")
             try:
                 numeric_quantity = float(q)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Entri ke-{idx} memiliki quantity yang bukan angka: {q}.") from exc
+
+            if not math.isfinite(numeric_quantity):
+                raise ValueError(f"Entri ke-{idx} memiliki quantity yang tidak valid (NaN atau inf).")
+
+            op = entry.get("opacity", 1.0)
+            try:
                 numeric_opacity = float(op)
             except (TypeError, ValueError) as exc:
-                raise ValueError("Nilai raster atau opacity harus berupa angka.") from exc
-            if not math.isfinite(numeric_quantity) or not math.isfinite(numeric_opacity) or not 0 <= numeric_opacity <= 1:
-                raise ValueError("Nilai raster atau opacity tidak valid.")
-            entries_xml += f'              <ColorMapEntry color="{c}" quantity="{numeric_quantity}" opacity="{numeric_opacity}" label="{lbl}"/>\n'
+                raise ValueError(f"Entri ke-{idx} memiliki opacity yang bukan angka: {op}.") from exc
+
+            if not math.isfinite(numeric_opacity) or not 0.0 <= numeric_opacity <= 1.0:
+                raise ValueError(f"Entri ke-{idx} memiliki opacity di luar rentang 0.0 - 1.0: {op}.")
+
+            if style_type in {"intervals", "ramp"}:
+                if prev_quantity is not None and numeric_quantity <= prev_quantity:
+                    raise ValueError(
+                        f"Entri ke-{idx} memiliki quantity ({numeric_quantity}) yang tidak naik ketat dibanding entri sebelumnya ({prev_quantity})."
+                    )
+                prev_quantity = numeric_quantity
+            elif style_type == "values":
+                if numeric_quantity in seen_values:
+                    raise ValueError(f"Entri ke-{idx} memiliki quantity duplikat: {numeric_quantity}.")
+                seen_values.add(numeric_quantity)
+
+            lbl = html.escape(str(entry.get("label", f"Class {numeric_quantity}")), quote=True)
+
+            # Semantik SLD GeoServer type='intervals':
+            # GeoServer mengimplementasikan interval sebagai [Q_{i-1}, Q_i) di mana batas atas adalah eksklusif (< Q_i).
+            # Untuk menyesuaikan dengan semantik UI AstraGIS (<= batas atas), quantity pada SEMUA entri intervals
+            # dinaikkan secara infinitesimal (math.nextafter(q, math.inf)).
+            xml_quantity = numeric_quantity
+            if style_type == "intervals":
+                xml_quantity = math.nextafter(numeric_quantity, math.inf)
+
+            q_str = repr(xml_quantity)
+            entries_xml += f'              <ColorMapEntry color="{c}" quantity="{q_str}" opacity="{numeric_opacity}" label="{lbl}"/>\n'
+
+        abstract_xml = ""
+        if style_type == "intervals":
+            abstract_xml = "      <Abstract>astra:upper_inclusive=1</Abstract>\n"
 
         sld_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <StyledLayerDescriptor version="1.0.0" 
@@ -53,7 +137,7 @@ class StyleService:
     <Name>{safe_style_name}</Name>
     <UserStyle>
       <Title>{safe_style_name}</Title>
-      <FeatureTypeStyle>
+{abstract_xml}      <FeatureTypeStyle>
         <Rule>
           <RasterSymbolizer>
             <ColorMap type="{style_type}">
@@ -70,7 +154,7 @@ class StyleService:
     def parse_raster_sld(self, sld_xml: str) -> Optional[Dict[str, Any]]:
         """
         Parse SLD XML to extract Raster ColorMap and ColorMapEntry items.
-        Returns dict with style_type and entries list, or None if no ColorMap found.
+        Returns dict with style_type, entries list, upper_inclusive boolean, and boundary_semantics.
         """
         if not sld_xml:
             return None
@@ -79,9 +163,13 @@ class StyleService:
             root = ET.fromstring(sld_xml)
             style_type = "intervals"
             raw_entries = []
+            upper_inclusive = False
+
             for elem in root.iter():
                 tag = elem.tag.split("}")[-1]
-                if tag == "ColorMap":
+                if tag == "Abstract" and elem.text and "astra:upper_inclusive=1" in elem.text:
+                    upper_inclusive = True
+                elif tag == "ColorMap":
                     style_type = elem.attrib.get("type", "intervals")
                 elif tag == "ColorMapEntry":
                     c = elem.attrib.get("color")
@@ -101,10 +189,17 @@ class StyleService:
                             "opacity": op,
                             "label": lbl
                         })
+
             if raw_entries:
+                if style_type == "intervals" and upper_inclusive:
+                    for entry in raw_entries:
+                        entry["quantity"] = math.nextafter(entry["quantity"], -math.inf)
+
                 return {
                     "style_type": style_type,
-                    "entries": raw_entries
+                    "entries": raw_entries,
+                    "upper_inclusive": upper_inclusive,
+                    "boundary_semantics": "upper_inclusive" if upper_inclusive else "unknown"
                 }
         except Exception as e:
             logger.warning(f"Error parsing raster SLD XML: {e}")
@@ -259,17 +354,107 @@ class StyleService:
 """
         return sld_xml
 
+    def compute_raster_statistics(self, file_path: str):
+        from .raster_stats_service import compute_raster_stats
+        try:
+            return compute_raster_stats(file_path), None
+        except Exception as exc:
+            return None, str(exc)
+
+    def classify_raster(self, file_path: str, method: str, classes: int):
+        from .raster_stats_service import classify
+        res = classify(file_path, method, classes)
+        return res["breaks"], res["effective_classes"], res["notice"]
+
     def apply_style(
         self,
         workspace: str,
         layer_name: str,
         style_name: str,
         sld_xml: Optional[str] = None
-    ) -> bool:
+    ) -> ApplyStyleResult:
+        """
+        Menerapkan style ke layer di GeoServer pada scope workspace dengan mekanisme rollback.
+        
+        Alur:
+        1. Cek apakah style sudah ada di workspace layer. Jika ada, simpan SLD lamanya untuk rollback.
+        2. Jika sld_xml diberikan, buat atau perbarui style di workspace layer tersebut.
+        3. Assign style ke layer. Jika assign gagal, lakukan rollback:
+           - Kembalikan ke SLD lama jika style sudah ada sebelumnya.
+           - Hapus style jika sebelumnya style belum ada.
+        4. Jika sukses, panggil truncate_gwc_layer untuk membersihkan cache GeoWebCache layer tersebut.
+        5. Mengembalikan ApplyStyleResult (dict yang juga mengevaluasi truthiness boolean).
+        """
+        clean_style = os.path.splitext(style_name)[0].replace('.', '_')
+        existed_before = False
+        old_sld = None
+
         if sld_xml:
-            sld_ok = geoserver_client.create_or_update_style(style_name, sld_xml)
-            if not sld_ok:
-                return False
-        return geoserver_client.assign_style_to_layer(workspace, layer_name, style_name)
+            try:
+                existed_before = geoserver_client.style_exists(clean_style, workspace_name=workspace)
+                if existed_before:
+                    old_sld = geoserver_client.get_style(clean_style, workspace_name=workspace)
+            except Exception as e:
+                logger.warning(f"Gagal memeriksa status style lama '{clean_style}' di workspace '{workspace}': {e}")
+
+            try:
+                sld_ok = geoserver_client.create_or_update_style(
+                    clean_style,
+                    sld_xml,
+                    workspace_name=workspace
+                )
+                if not sld_ok:
+                    return ApplyStyleResult({
+                        "success": False,
+                        "failed_stage": "CREATE_OR_UPDATE_STYLE",
+                        "message": f"GeoServer gagal menyimpan SLD untuk style '{clean_style}' di workspace '{workspace}'."
+                    })
+            except Exception as exc:
+                logger.exception(f"Error saat create_or_update_style '{clean_style}' di workspace '{workspace}': {exc}")
+                return ApplyStyleResult({
+                    "success": False,
+                    "failed_stage": "CREATE_OR_UPDATE_STYLE",
+                    "message": f"Gagal membuat atau memperbarui style '{clean_style}': {exc}"
+                })
+
+        try:
+            assigned = geoserver_client.assign_style_to_layer(workspace, layer_name, clean_style)
+        except Exception as exc:
+            assigned = False
+            assign_err_msg = str(exc)
+        else:
+            assign_err_msg = "GeoServer mengembalikan status gagal saat assign style ke layer."
+
+        if not assigned:
+            logger.warning(f"Assign style '{clean_style}' ke layer '{layer_name}' gagal. Memulai rollback...")
+            # Mekanisme Rollback:
+            if sld_xml:
+                try:
+                    if existed_before and old_sld:
+                        geoserver_client.create_or_update_style(clean_style, old_sld, workspace_name=workspace)
+                        logger.info(f"Rollback berhasil: style '{clean_style}' dikembalikan ke SLD sebelumnya.")
+                    elif not existed_before:
+                        geoserver_client.delete_style(clean_style, workspace_name=workspace, recurse=False)
+                        logger.info(f"Rollback berhasil: style baru '{clean_style}' dihapus dari workspace '{workspace}'.")
+                except Exception as rb_exc:
+                    logger.exception(f"Rollback style '{clean_style}' gagal: {rb_exc}")
+
+            return ApplyStyleResult({
+                "success": False,
+                "failed_stage": "ASSIGN_STYLE",
+                "message": f"Gagal menetapkan style '{clean_style}' pada layer '{layer_name}': {assign_err_msg}"
+            })
+
+        # Bersihkan tile cache GeoWebCache
+        try:
+            geoserver_client.truncate_gwc_layer(workspace, layer_name)
+        except Exception as gwc_err:
+            logger.warning(f"Gagal membersihkan cache GeoWebCache layer '{workspace}:{layer_name}': {gwc_err}")
+
+        return ApplyStyleResult({
+            "success": True,
+            "failed_stage": None,
+            "message": f"Style '{clean_style}' berhasil diaplikasikan ke layer '{layer_name}' di workspace '{workspace}'."
+        })
 
 style_service = StyleService()

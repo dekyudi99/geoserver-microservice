@@ -254,28 +254,43 @@ class GeoServerClient:
 
     # โ”€โ”€ STYLES & SLD โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
-    def style_exists(self, style_name: str) -> bool:
+    def style_exists(self, style_name: str, workspace_name: Optional[str] = None) -> bool:
         clean_name = os.path.splitext(style_name)[0].replace('.', '_')
-        res = self._request("GET", f"/rest/styles/{clean_name}.json")
+        path = f"/rest/workspaces/{workspace_name}/styles/{clean_name}.json" if workspace_name else f"/rest/styles/{clean_name}.json"
+        res = self._request("GET", path)
         return res.status_code == 200
 
-    def create_or_update_style(self, style_name: str, sld_xml: str) -> bool:
+    def get_style(self, style_name: str, workspace_name: Optional[str] = None) -> Optional[str]:
+        """Mengambil SLD XML untuk style tertentu (workspace-level atau global)."""
         clean_name = os.path.splitext(style_name)[0].replace('.', '_')
-        if not self.style_exists(clean_name):
-            # Create style stub
+        if workspace_name:
+            path = f"/rest/workspaces/{workspace_name}/styles/{clean_name}.sld"
+            res = self._request("GET", path)
+            if res.status_code == 200:
+                return res.text
+        path_global = f"/rest/styles/{clean_name}.sld"
+        res_global = self._request("GET", path_global)
+        if res_global.status_code == 200:
+            return res_global.text
+        return None
+
+    def create_or_update_style(self, style_name: str, sld_xml: str, workspace_name: Optional[str] = None) -> bool:
+        clean_name = os.path.splitext(style_name)[0].replace('.', '_')
+        prefix = f"/rest/workspaces/{workspace_name}" if workspace_name else "/rest"
+
+        if not self.style_exists(clean_name, workspace_name=workspace_name):
             create_res = self._request(
                 "POST",
-                "/rest/styles",
+                f"{prefix}/styles",
                 headers={"Content-Type": "text/xml"},
                 data=f"<style><name>{clean_name}</name><filename>{clean_name}.sld</filename></style>"
             )
             if create_res.status_code not in (200, 201):
-                raise RuntimeError(f"Gagal membuat stub style: {create_res.text}")
+                raise RuntimeError(f"Gagal membuat stub style '{clean_name}': {create_res.text}")
 
-        # Upload SLD body
         res = self._request(
             "PUT",
-            f"/rest/styles/{clean_name}",
+            f"{prefix}/styles/{clean_name}",
             headers={"Content-Type": "application/vnd.ogc.sld+xml"},
             data=sld_xml.encode("utf-8")
         )
@@ -286,24 +301,149 @@ class GeoServerClient:
 
     def assign_style_to_layer(self, workspace_name: str, layer_name: str, style_name: str) -> bool:
         clean_style = os.path.splitext(style_name)[0].replace('.', '_')
-        if not self.style_exists(clean_style):
+        if not self.style_exists(clean_style, workspace_name=workspace_name) and not self.style_exists(clean_style):
             raise ValueError(f"Style '{clean_style}' tidak ditemukan di GeoServer.")
 
-        # Workspace layer endpoint
         url = f"/rest/workspaces/{workspace_name}/layers/{layer_name}.json"
-        body = {
+        body_ws = {
+            "layer": {
+                "defaultStyle": {
+                    "name": clean_style,
+                    "workspace": workspace_name
+                }
+            }
+        }
+        res_ws = self._request("PUT", url, json=body_ws)
+        if res_ws.status_code in (200, 201):
+            return True
+
+        body_simple = {
             "layer": {
                 "defaultStyle": {"name": clean_style}
             }
         }
-        res = self._request("PUT", url, json=body)
+        res = self._request("PUT", url, json=body_simple)
         if res.status_code in (200, 201):
             return True
 
-        # Fallback to global layer endpoint
         url_global = f"/rest/layers/{layer_name}.json"
-        res_global = self._request("PUT", url_global, json=body)
+        res_global = self._request("PUT", url_global, json=body_simple)
         return res_global.status_code in (200, 201)
+
+    def truncate_gwc_layer(self, workspace_name: str, layer_name: str) -> bool:
+        """Membersihkan tile cache GeoWebCache (GWC) untuk layer tertentu bila ter-cache."""
+        layer_qualified = f"{workspace_name}:{layer_name}"
+        try:
+            check_res = self._request("GET", f"/gwc/rest/layers/{layer_qualified}.xml")
+            if check_res.status_code != 200:
+                return True
+            payload = f"<truncateLayer><layerName>{layer_qualified}</layerName></truncateLayer>"
+            res = self._request(
+                "POST",
+                "/gwc/rest/masstruncate",
+                headers={"Content-Type": "text/xml"},
+                data=payload
+            )
+            return res.status_code in (200, 204)
+        except Exception as exc:
+            logger.warning(f"Gagal truncate GWC layer '{layer_qualified}': {exc}")
+            return False
+
+    def ensure_gwc_layer(
+        self,
+        workspace_name: str,
+        layer_name: str,
+        gridset: str = "EPSG:900913",
+        fmt: str = "image/png"
+    ) -> bool:
+        """
+        Memastikan layer terdaftar dan aktif di GeoWebCache dengan gridset dan format yang ditentukan.
+        1. GET /gwc/rest/layers/{layer_qualified}.xml.
+        2. Jika 200, pastikan gridset dan format ada. Jika sudah ada, return True.
+        3. Jika belum ada atau gridset belum lengkap, PUT /gwc/rest/layers/{layer_qualified}.xml dengan XML GeoServerLayer.
+        4. Return True jika 200/201. Tangkap exception, log warning, return False.
+        """
+        layer_qualified = f"{workspace_name}:{layer_name}"
+        try:
+            check_res = self._request("GET", f"/gwc/rest/layers/{layer_qualified}.xml")
+            if check_res.status_code == 200:
+                text_xml = check_res.text or ""
+                if f"<gridSetName>{gridset}</gridSetName>" in text_xml and f"<string>{fmt}</string>" in text_xml:
+                    return True
+
+            put_payload = f"""<?xml version="1.0" encoding="UTF-8"?>
+<GeoServerLayer>
+  <enabled>true</enabled>
+  <inMemoryCached>true</inMemoryCached>
+  <name>{layer_qualified}</name>
+  <mimeFormats>
+    <string>{fmt}</string>
+    <string>image/jpeg</string>
+  </mimeFormats>
+  <gridSubsets>
+    <gridSubset>
+      <gridSetName>{gridset}</gridSetName>
+    </gridSubset>
+  </gridSubsets>
+  <metaWidthHeight>
+    <int>4</int>
+    <int>4</int>
+  </metaWidthHeight>
+  <expireCache>0</expireCache>
+  <expireClients>0</expireClients>
+</GeoServerLayer>"""
+            put_res = self._request(
+                "PUT",
+                f"/gwc/rest/layers/{layer_qualified}.xml",
+                headers={"Content-Type": "text/xml"},
+                data=put_payload
+            )
+            return put_res.status_code in (200, 201)
+        except Exception as exc:
+            logger.warning(f"Gagal memastikan GWC layer '{layer_qualified}': {exc}")
+            return False
+
+    def delete_gwc_layer(self, workspace_name: str, layer_name: str) -> bool:
+        """
+        Menghapus konfigurasi layer dari GeoWebCache (best effort).
+        DELETE /gwc/rest/layers/{layer_qualified}.xml
+        Tidak boleh melempar error agar penghapusan layer utama tidak gagal.
+        """
+        layer_qualified = f"{workspace_name}:{layer_name}"
+        try:
+            res = self._request("DELETE", f"/gwc/rest/layers/{layer_qualified}.xml")
+            return res.status_code in (200, 204, 404)
+        except Exception as exc:
+            logger.warning(f"Gagal menghapus GWC layer '{layer_qualified}': {exc}")
+            return False
+
+    def probe_gwc_tile(
+        self,
+        workspace_name: str,
+        layer_name: str,
+        z: int = 10,
+        x: int = 0,
+        y: int = 0,
+        gridset: str = "EPSG:900913",
+        fmt: str = "image/png"
+    ) -> bool:
+        """
+        Melakukan satu probe GetTile ke GeoWebCache untuk memverifikasi kesiapan cache.
+        Mengembalikan True hanya jika respon HTTP 200 dan Content-Type berupa image/*.
+        """
+        layer_qualified = f"{workspace_name}:{layer_name}"
+        path = (
+            f"/gwc/service/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0"
+            f"&LAYER={layer_qualified}&STYLE=&TILEMATRIXSET={gridset}&FORMAT={fmt}"
+            f"&TILEMATRIX={gridset}:{z}&TILEROW={y}&TILECOL={x}"
+        )
+        try:
+            res = self._request("GET", path)
+            content_type = res.headers.get("Content-Type", "")
+            return res.status_code == 200 and "image" in content_type
+        except Exception as exc:
+            logger.warning(f"Probe GWC tile gagal untuk '{layer_qualified}': {exc}")
+            return False
 
     # โ”€โ”€ WMS / WFS CAPABILITIES โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€โ”€
 
@@ -315,7 +455,7 @@ class GeoServerClient:
             return xmltodict.parse(res.text)
         raise RuntimeError(f"Gagal mengambil WMS capabilities: {res.text}")
 
-    def delete_style(self, style_name: str, workspace_name: Optional[str] = None, recurse: bool = True) -> bool:
+    def delete_style(self, style_name: str, workspace_name: Optional[str] = None, recurse: bool = False) -> bool:
         if workspace_name:
             path = f"rest/workspaces/{workspace_name}/styles/{style_name}?recurse={str(recurse).lower()}"
         else:
@@ -410,6 +550,74 @@ class GeoServerClient:
             f"/rest/workspaces/{workspace_name}/layergroups/{clean_name}"
         )
         return res.status_code in (200, 204, 404)
+
+    @staticmethod
+    def _parse_ows_exception(xml_text: str) -> str:
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(xml_text)
+            for elem in root.iter():
+                if "ExceptionText" in elem.tag or "ServiceException" in elem.tag:
+                    if elem.text:
+                        return elem.text.strip()
+            return xml_text[:300].strip()
+        except Exception:
+            return xml_text[:300].strip()
+
+    @staticmethod
+    def _parse_hits_number(xml_text: str) -> int:
+        try:
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(xml_text)
+            num = root.attrib.get("numberMatched")
+            if num is not None and num != "unknown":
+                return int(num)
+            num_ret = root.attrib.get("numberReturned")
+            if num_ret is not None and num_ret != "unknown":
+                return int(num_ret)
+            return 0
+        except Exception:
+            return 0
+
+    def describe_feature_type(self, workspace_name: str, layer_name: str) -> Dict[str, Any]:
+        """Mengambil skema DescribeFeatureType WFS 2.0.0 dalam format JSON."""
+        path = f"{workspace_name}/wfs"
+        params = {
+            "service": "WFS",
+            "version": "2.0.0",
+            "request": "DescribeFeatureType",
+            "typeName": f"{workspace_name}:{layer_name}",
+            "outputFormat": "application/json"
+        }
+        res = self._request("GET", path, params=params)
+        if res.status_code != 200:
+            err = self._parse_ows_exception(res.text)
+            raise ValueError(f"GeoServer DescribeFeatureType error ({res.status_code}): {err}")
+        return res.json()
+
+    def get_features(self, workspace_name: str, layer_name: str, **params) -> Dict[str, Any]:
+        """Memanggil WFS 2.0.0 GetFeature untuk layer tertentu."""
+        path = f"{workspace_name}/wfs"
+        query_params = {
+            "service": "WFS",
+            "version": "2.0.0",
+            "request": "GetFeature",
+            "typeNames": f"{workspace_name}:{layer_name}",
+            "outputFormat": "application/json"
+        }
+        query_params.update(params)
+        res = self._request("GET", path, params=query_params)
+        if res.status_code != 200:
+            err = self._parse_ows_exception(res.text)
+            raise ValueError(f"GeoServer GetFeature error ({res.status_code}): {err}")
+
+        if params.get("resultType") == "hits":
+            return {"xml": res.text, "numberMatched": self._parse_hits_number(res.text)}
+
+        try:
+            return res.json()
+        except Exception:
+            return {"raw": res.text}
 
 geoserver_client = GeoServerClient()
 

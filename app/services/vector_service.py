@@ -13,6 +13,7 @@ from shapely.geometry import (
 )
 from shapely.validation import make_valid
 from ..config.database import engine, spatial_engine, ensure_postgis_extension
+from sqlalchemy import text
 from ..config.settings import settings
 from ..clients.geoserver_client import geoserver_client
 from .style_service import style_service
@@ -248,10 +249,15 @@ class VectorService:
 
         # 2. Simpan GeoDataFrame ke PostGIS DB
         clean_gdf = gdf.copy()
-        # Normalisasi kolom yang bertipe object tidak serializable
+        # Normalisasi kolom dan hindari bentrok dengan PK gid
+        rename_map = {}
         for col in clean_gdf.columns:
-            if col != 'geometry' and clean_gdf[col].dtype == 'object':
+            if str(col).strip().lower() == "gid":
+                rename_map[col] = "gid_src"
+            elif col != 'geometry' and clean_gdf[col].dtype == 'object':
                 clean_gdf[col] = clean_gdf[col].astype(str)
+        if rename_map:
+            clean_gdf.rename(columns=rename_map, inplace=True)
 
         clean_gdf.to_postgis(
             name=table_name,
@@ -260,6 +266,10 @@ class VectorService:
             index=False,
             schema="public"
         )
+
+        with spatial_engine.begin() as conn:
+            conn.execute(text(f'ALTER TABLE "{table_name}" ADD COLUMN IF NOT EXISTS "gid" BIGSERIAL PRIMARY KEY;'))
+            conn.execute(text(f'CREATE INDEX IF NOT EXISTS "idx_{table_name}_geom" ON "{table_name}" USING GIST (geometry);'))
 
         # 3. Publish FeatureType ke GeoServer
         geoserver_client.publish_postgis_feature_type(

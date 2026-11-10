@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Literal
 from pydantic import BaseModel
 import logging
 import os
@@ -8,19 +8,20 @@ import uuid
 import json
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends, Query
 from sqlalchemy.orm import Session
-from typing import Optional, Dict, Any
+from typing import Optional
 from ...services.vector_service import vector_service
 from ...services.raster_service import raster_service
 from ...clients.geoserver_client import geoserver_client
-from ...config.database import get_db, engine, spatial_engine
+from ...config.database import get_db, spatial_engine
 from sqlalchemy import text
 from ...config.settings import settings
 from ...schemas.v1.spatial_data import VectorPublishResponse, RasterPublishResponse
 from ...models.api_key import ApiKey, ApiKeyType
 from ...models.spatial_data import VectorLayer, RasterMetadata, WorkspaceMetadata
-from ...services.hash_id import encode_id, decode_id, resolve_workspace
+from ...services.hash_id import encode_id, resolve_workspace
 from ...security.auth import require_any_key
 from ...security.rate_limiter import rate_limit
+from .features import invalidate_schema_cache
 from ...services.audit_service import log_action
 from ...models.ingest_job import IngestJob
 from .api_keys import get_disk_usage_for_key, MAX_SPATIAL_QUOTA_BYTES
@@ -28,14 +29,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-def build_dynamic_wms_url(workspace_name: str, layer_name: Optional[str] = None) -> str:
+def build_dynamic_wms_url(workspace_name: str) -> str:
     """
     Menghasilkan WMS URL dinamis berbasis environment variable GEOSERVER_WMS_URL.
     Menggabungkan domain base dari .env dengan nama workspace sehingga sistem dapat
     berganti domain WMS secara dinamis (localhost, ngrok/tunnel, VPS production)
     tanpa terikat URL statis yang tersimpan di database.
     """
-    base_wms = os.getenv("GEOSERVER_WMS_URL") or getattr(settings, "GEOSERVER_WMS_URL", None) or "http://localhost:8080/geoserver"
+    base_wms = os.getenv("GEOSERVER_WMS_URL") or getattr(settings, "GEOSERVER_WMS_URL", None)
     base_wms = str(base_wms).rstrip("/")
     if base_wms.endswith("/wms"):
         base_wms = base_wms[:-4].rstrip("/")
@@ -45,8 +46,24 @@ def build_dynamic_layer_wms_url(workspace_name: str, layer_name: str) -> str:
     """
     Menghasilkan URL direct GetMap lengkap yang menggabungkan base WMS, workspace, dan layer.
     """
-    wms_endpoint = build_dynamic_wms_url(workspace_name, layer_name)
+    wms_endpoint = build_dynamic_wms_url(workspace_name)
     return f"{wms_endpoint}?service=WMS&version=1.1.1&request=GetMap&layers={workspace_name}:{layer_name}&format=image/png&transparent=true"
+
+def build_dynamic_gwc_url() -> str:
+    """
+    Menghasilkan base GeoServer URL dinamis berbasis environment variable GEOSERVER_WMS_URL.
+    Mengembalikan URL tanpa nama workspace dan tanpa trailing '/wms'.
+    Contoh: 'http://localhost:8080/geoserver'
+    """
+    base_wms = os.getenv("GEOSERVER_WMS_URL") or getattr(settings, "GEOSERVER_WMS_URL", None) or "http://localhost:8080/geoserver"
+    base_wms = str(base_wms).rstrip("/")
+    if base_wms.endswith("/wms"):
+        base_wms = base_wms[:-4].rstrip("/")
+    return base_wms
+
+class ServiceModePayload(BaseModel):
+    mode: Literal["wms", "wmts"]
+    layer_kind: Optional[Literal["raster", "vector"]] = None
 
 logger = logging.getLogger("geoserver_service.v1_layer")
 
@@ -116,6 +133,12 @@ async def publish_vector(
             geom_type=stats.get("geometry_type", "Polygon")
         )
 
+        # Truncate GWC bila data ditimpa / diupdate
+        try:
+            geoserver_client.truncate_gwc_layer(actual_ws_name, final_table_name)
+        except Exception as gwc_err:
+            logger.warning(f"GWC truncate notice on publish_vector: {gwc_err}")
+
         # 4. Save metadata with owner api_key_id
         vector_layer = VectorLayer(
             api_key_id=caller.id,
@@ -153,7 +176,7 @@ async def publish_vector(
             bbox=res["bbox"],
             srid=res["srid"],
             simplification=stats,
-            wms_url=build_dynamic_wms_url(actual_ws_name, final_table_name)
+            wms_url=build_dynamic_wms_url(actual_ws_name)
 
         )
     except Exception as e:
@@ -226,6 +249,12 @@ async def publish_raster(
             style_config=parsed_style
         )
 
+        # Truncate GWC bila data ditimpa / diupdate
+        try:
+            geoserver_client.truncate_gwc_layer(actual_ws_name, final_store_name)
+        except Exception as gwc_err:
+            logger.warning(f"GWC truncate notice on publish_raster: {gwc_err}")
+
         raster_meta = RasterMetadata(
             api_key_id=caller.id,
             workspace_name=actual_ws_name,
@@ -262,7 +291,7 @@ async def publish_raster(
             epsg=res["epsg"],
             bbox=res["bbox"],
             dimensions=res["dimensions"],
-            wms_url=build_dynamic_wms_url(actual_ws_name, final_store_name),
+            wms_url=build_dynamic_wms_url(actual_ws_name),
 
             symbology=res.get("symbology")
         )
@@ -357,9 +386,12 @@ def get_my_layers(
                 "bbox": v.bbox,
                 "srid": v.srid or 4326,
                 "epsg": v.srid or 4326,
-                "wms_url": build_dynamic_wms_url(v.workspace_name, v.table_name),
+                "wms_url": build_dynamic_wms_url(v.workspace_name),
                 "direct_wms_url": build_dynamic_layer_wms_url(v.workspace_name, v.table_name),
                 "wms_layers_param": f"{v.workspace_name}:{v.table_name}",
+                "service_mode": getattr(v, "service_mode", "wms") or "wms",
+                "gwc_ready": bool(getattr(v, "gwc_ready", False)),
+                "gwc_url": build_dynamic_gwc_url(),
                 "symbology": v.symbology,
                 "style_name": v.symbology.get("style_name") if isinstance(v.symbology, dict) else None,
                 "created_at": str(v.created_at)
@@ -385,9 +417,12 @@ def get_my_layers(
                 "bbox": r.bbox,
                 "dimensions": r.dimensions,
                 "epsg": r.epsg or 4326,
-                "wms_url": build_dynamic_wms_url(r.workspace_name, r.store_name),
+                "wms_url": build_dynamic_wms_url(r.workspace_name),
                 "direct_wms_url": build_dynamic_layer_wms_url(r.workspace_name, r.store_name),
                 "wms_layers_param": f"{r.workspace_name}:{r.store_name}",
+                "service_mode": getattr(r, "service_mode", "wms") or "wms",
+                "gwc_ready": bool(getattr(r, "gwc_ready", False)),
+                "gwc_url": build_dynamic_gwc_url(),
                 "symbology": r.symbology,
                 "style_name": r.symbology.get("style_name") if isinstance(r.symbology, dict) else None,
                 "created_at": str(r.created_at)
@@ -479,6 +514,7 @@ def batch_delete_layers(
                         except Exception:
                             pass
                     db.delete(ij)
+                invalidate_schema_cache(str(vec.id))
                 db.delete(vec)
                 db.commit()
                 deleted_count += 1
@@ -606,6 +642,11 @@ def delete_layer(
             geoserver_client.delete_layer(workspace_name=actual_ws_name, layer_name=vec.table_name, recurse=recurse)
         except Exception as e:
             logger.warning(f"GeoServer delete_layer vector notice: {e}")
+        # Hapus konfigurasi tile cache GeoWebCache (best effort)
+        try:
+            geoserver_client.delete_gwc_layer(actual_ws_name, vec.table_name)
+        except Exception:
+            pass
         # Hapus FeatureType dari datastore PostGIS di GeoServer
         try:
             geoserver_client.delete_feature_type(workspace_name=actual_ws_name, store_name="postgis_default", feature_type_name=vec.table_name, recurse=recurse)
@@ -637,6 +678,7 @@ def delete_layer(
                     pass
             db.delete(ij)
 
+        invalidate_schema_cache(str(vec.id))
         db.delete(vec)
         db.commit()
         deleted_something = True
@@ -647,6 +689,10 @@ def delete_layer(
         for target_lyr in targets:
             try:
                 geoserver_client.delete_layer(workspace_name=actual_ws_name, layer_name=target_lyr, recurse=recurse)
+            except Exception:
+                pass
+            try:
+                geoserver_client.delete_gwc_layer(actual_ws_name, target_lyr)
             except Exception:
                 pass
         try:
@@ -682,6 +728,11 @@ def delete_layer(
             geoserver_client.delete_coverage_store(workspace_name=actual_ws_name, store_name=f"store_{layer_name}", recurse=recurse)
         except Exception:
             pass
+        try:
+            geoserver_client.delete_gwc_layer(actual_ws_name, layer_name)
+            geoserver_client.delete_gwc_layer(actual_ws_name, f"store_{layer_name}")
+        except Exception:
+            pass
 
     log_action(
         db=db,
@@ -703,5 +754,141 @@ def get_layer_metadata(
     if not layer_info:
         raise HTTPException(status_code=404, detail=f"Layer '{layer_name}' tidak ditemukan di GeoServer.")
     return layer_info
+
+def _calculate_layer_center_tile(raw_bbox, epsg=4326, zoom=10):
+    if not raw_bbox:
+        return None
+    try:
+        import math
+        if isinstance(raw_bbox, dict):
+            minx = float(raw_bbox.get("left") or raw_bbox.get("minx") or raw_bbox.get("west"))
+            miny = float(raw_bbox.get("bottom") or raw_bbox.get("miny") or raw_bbox.get("south"))
+            maxx = float(raw_bbox.get("right") or raw_bbox.get("maxx") or raw_bbox.get("east"))
+            maxy = float(raw_bbox.get("top") or raw_bbox.get("maxy") or raw_bbox.get("north"))
+        elif isinstance(raw_bbox, (list, tuple)) and len(raw_bbox) >= 4:
+            minx, miny, maxx, maxy = [float(v) for v in raw_bbox[:4]]
+        else:
+            return None
+
+        # Cek apakah koordinat dalam rentang derajat WGS84
+        is_degree = (-180.0 <= minx <= 180.0) and (-180.0 <= maxx <= 180.0) and (-90.0 <= miny <= 90.0) and (-90.0 <= maxy <= 90.0)
+        if not is_degree and epsg not in (4326, "4326", None):
+            try:
+                from pyproj import Transformer
+                transformer = Transformer.from_crs(f"EPSG:{epsg}", "EPSG:4326", always_xy=True)
+                minx, miny = transformer.transform(minx, miny)
+                maxx, maxy = transformer.transform(maxx, maxy)
+            except Exception:
+                pass
+
+        center_lng = (minx + maxx) / 2.0
+        center_lat = (miny + maxy) / 2.0
+
+        n = 2.0 ** zoom
+        col = int(math.floor(((center_lng + 180.0) / 360.0) * n))
+        lat_rad = math.radians(max(min(center_lat, 85.0511), -85.0511))
+        row = int(math.floor(((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0) * n))
+        return {"z": zoom, "x": col, "y": row}
+    except Exception:
+        return None
+
+@router.patch("/{layer_id}/service-mode", status_code=status.HTTP_200_OK)
+def set_service_mode(
+    layer_id: str,
+    payload: ServiceModePayload,
+    db: Session = Depends(get_db),
+    caller: ApiKey = Depends(require_any_key)
+):
+    """
+    Mengubah mode layanan layer: 'wms' (dinamis) atau 'wmts' (tile cached).
+    Jika beralih ke 'wmts', backend memanggil ensure_gwc_layer untuk memastikan
+    layer terdaftar di GeoWebCache dengan gridset EPSG:900913 dan format image/png.
+    Setelah itu dilakukan probe GetTile server-side ke tile tengah bbox;
+    gwc_ready diset True hanya jika hasilnya 200 image/png.
+    Jika GWC gagal, mengembalikan status 502 dan database tidak diubah.
+    """
+    try:
+        layer_uuid = uuid.UUID(str(layer_id))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=400, detail="layer_id tidak valid.") from exc
+
+    target_obj = None
+    layer_kind = payload.layer_kind
+
+    if layer_kind == "raster":
+        target_obj = db.query(RasterMetadata).filter(RasterMetadata.id == layer_uuid).first()
+    elif layer_kind == "vector":
+        target_obj = db.query(VectorLayer).filter(VectorLayer.id == layer_uuid).first()
+    else:
+        target_obj = db.query(RasterMetadata).filter(RasterMetadata.id == layer_uuid).first()
+        if not target_obj:
+            target_obj = db.query(VectorLayer).filter(VectorLayer.id == layer_uuid).first()
+            if target_obj:
+                layer_kind = "vector"
+        else:
+            layer_kind = "raster"
+
+    if not target_obj:
+        raise HTTPException(status_code=404, detail="Layer tidak ditemukan.")
+
+    if target_obj.api_key_id != caller.id and caller.key_type != ApiKeyType.PRIMARY:
+        raise HTTPException(status_code=403, detail="Anda tidak memiliki izin mengubah mode layer ini.")
+
+    ws_name = target_obj.workspace_name
+    lyr_name = target_obj.store_name if isinstance(target_obj, RasterMetadata) else target_obj.table_name
+
+    if payload.mode == "wmts":
+        ok = geoserver_client.ensure_gwc_layer(ws_name, lyr_name, gridset="EPSG:900913", fmt="image/png")
+        if not ok:
+            raise HTTPException(
+                status_code=502,
+                detail=f"GeoWebCache gagal menyiapkan layer cache untuk '{ws_name}:{lyr_name}'."
+            )
+        
+        # Server-side validation probe GetTile ke tile tengah bbox
+        gwc_probe_ok = False
+        try:
+            layer_epsg = getattr(target_obj, "srid", None) or getattr(target_obj, "epsg", None) or 4326
+            tile_coords = _calculate_layer_center_tile(target_obj.bbox, layer_epsg, zoom=10)
+            if tile_coords:
+                gwc_probe_ok = geoserver_client.probe_gwc_tile(
+                    ws_name, lyr_name, z=tile_coords["z"], x=tile_coords["x"], y=tile_coords["y"]
+                )
+            else:
+                gwc_probe_ok = True
+        except Exception as e:
+            logger.warning(f"Server-side probe exception for {ws_name}:{lyr_name}: {e}")
+            gwc_probe_ok = False
+
+        target_obj.gwc_ready = gwc_probe_ok
+        target_obj.service_mode = "wmts"
+    else:
+        target_obj.service_mode = "wms"
+
+    db.commit()
+    db.refresh(target_obj)
+
+    log_action(
+        db=db,
+        api_key=caller,
+        action="UPDATE_SERVICE_MODE",
+        resource_type="LAYER",
+        resource_id=str(layer_uuid),
+        resource_name=lyr_name,
+        status="SUCCESS"
+    )
+
+    return {
+        "success": True,
+        "layer_id": str(target_obj.id),
+        "layer_name": lyr_name,
+        "workspace_name": ws_name,
+        "layer_kind": layer_kind,
+        "service_mode": target_obj.service_mode,
+        "gwc_ready": bool(target_obj.gwc_ready),
+        "gwc_url": build_dynamic_gwc_url(),
+        "message": f"Mode tampilan layer '{lyr_name}' berhasil diubah ke {target_obj.service_mode.upper()}."
+    }
+
 
 

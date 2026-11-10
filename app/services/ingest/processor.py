@@ -370,6 +370,8 @@ class IngestProcessor:
         for col in gdf.columns:
             if col != "geometry":
                 clean_col = re.sub(r"[^a-zA-Z0-9_]", "_", str(col).lower().strip()).strip("_")
+                if clean_col == "gid":
+                    clean_col = "gid_src"
                 if clean_col in ("table", "user", "order", "group", "select", "from", "where"):
                     clean_col = f"col_{clean_col}"
                 new_cols[col] = clean_col[:50]
@@ -382,6 +384,7 @@ class IngestProcessor:
                 conn.execute(text(f"""
                     DROP TABLE IF EXISTS "{geoserver_name}" CASCADE;
                     ALTER TABLE "{staging_table_name}" RENAME TO "{geoserver_name}";
+                    ALTER TABLE "{geoserver_name}" ADD COLUMN IF NOT EXISTS "gid" BIGSERIAL PRIMARY KEY;
                     CREATE INDEX "idx_{geoserver_name}_geom" ON "{geoserver_name}" USING GIST (geometry);
                 """))
             # ANALYZE agar GeoServer memakai estimated extent (tanpa full scan) saat publish.
