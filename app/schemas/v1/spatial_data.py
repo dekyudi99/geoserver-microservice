@@ -120,3 +120,18 @@ class FeatureIdentifyResponse(BaseModel):
     layer_name: str
     count: int
     features: List[Dict[str, Any]]
+
+class RasterIdentifyRequest(BaseModel):
+    lat: float
+    lng: float
+
+class RasterStatsRequest(BaseModel):
+    bbox: List[float]
+    band: Optional[int] = 1
+    bins: Optional[int] = 20
+
+class RasterClipRequest(BaseModel):
+    bbox: List[float]
+    styled: Optional[bool] = True
+    mask_polygon: Optional[List[List[float]]] = None
+

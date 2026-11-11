@@ -232,6 +232,12 @@ def create_workspace(
     db: Session = Depends(get_db),
     key = Depends(get_verified_key)
 ):
+    if getattr(key, "key_type", None) != ApiKeyType.PRIMARY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Hanya PRIMARY key (admin) yang memiliki izin untuk membuat workspace baru."
+        )
+
     display = (body.display_name or body.name_workspace or body.workspace_name or "Workspace").strip()
 
     if body.workspace_name and re.match(r"^[a-zA-Z0-9_\-]+$", body.workspace_name):

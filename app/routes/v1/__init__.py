@@ -11,6 +11,7 @@ from .api_keys import router as api_keys_router
 from .logs import router as logs_router
 from .ingest import router as ingest_router
 from .features import router as features_router
+from .raster import router as raster_router
 from ...security.auth import require_any_key
 
 api_v1_router = APIRouter(prefix="/api/v1")
@@ -32,3 +33,4 @@ api_v1_router.include_router(logs_router)
 
 api_v1_router.include_router(ingest_router)
 api_v1_router.include_router(features_router, dependencies=auth_dep)
+api_v1_router.include_router(raster_router, dependencies=auth_dep)

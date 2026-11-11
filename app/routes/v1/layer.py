@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Tuple
 from pydantic import BaseModel
 import logging
 import os
@@ -452,6 +452,127 @@ def _is_valid_uuid(val: str) -> bool:
 
 class BatchDeleteLayersRequest(BaseModel):
     layer_ids: List[str]
+    orphan_cleanup: bool = False
+
+def _is_table_referenced_elsewhere(
+    db: Session,
+    table_name: str,
+    exclude_vec_id: Optional[uuid.UUID] = None,
+    exclude_ws: Optional[str] = None,
+    exclude_ft: Optional[str] = None
+) -> Tuple[bool, Optional[str]]:
+    """
+    Memeriksa apakah nama tabel PostGIS masih direferensikan oleh:
+    1. VectorLayer lain di PostgreSQL.
+    2. FeatureType di datastore GeoServer yang mengarah ke database spasial yang SAMA.
+    Membandingkan (host, port, database, schema, table).
+    Jika pengecekan ke GeoServer gagal, mengembalikan (True, reason) sebagai fail-safe.
+    """
+    if not table_name:
+        return False, None
+
+    # 1. Cek DB VectorLayer
+    query = db.query(VectorLayer).filter(VectorLayer.table_name == table_name)
+    if exclude_vec_id:
+        query = query.filter(VectorLayer.id != exclude_vec_id)
+    other_vec = query.first()
+    if other_vec:
+        return True, f"Direferensikan oleh VectorLayer lain di DB (id={other_vec.id})"
+
+    # 2. Cek GeoServer datastores yang menunjuk ke database & schema yang sama
+    target_host = settings.POSTGIS_HOST or "db-central-postgres"
+    target_db = settings.POSTGIS_DB or "spatial"
+    target_schema = "public"
+
+    try:
+        raw_workspaces = geoserver_client.get_workspaces()
+        for ws_info in raw_workspaces:
+            ws = ws_info.get("name")
+            if not ws:
+                continue
+            datastores = geoserver_client.get_datastores(ws)
+            for ds in datastores:
+                ds_name = ds.get("name")
+                ds_detail = geoserver_client.get_datastore(ws, ds_name)
+                if not ds_detail:
+                    continue
+                conn_entries = ds_detail.get("connectionParameters", {}).get("entry", [])
+                params = {e.get("@key"): e.get("$") for e in conn_entries if isinstance(e, dict)}
+                ds_host = params.get("host")
+                ds_database = params.get("database")
+                ds_schema = params.get("schema", "public")
+
+                is_same_db = (
+                    ds_database == target_db and
+                    ds_schema == target_schema and
+                    (ds_host == target_host or ds_host in ("127.0.0.1", "localhost", "db-central-postgres"))
+                )
+                if is_same_db:
+                    fts = geoserver_client.get_feature_types(ws, ds_name)
+                    for ft in fts:
+                        ft_name = ft.get("name")
+                        if exclude_ws and exclude_ft and ws == exclude_ws and ft_name == exclude_ft:
+                            continue
+                        if ft_name == table_name:
+                            return True, f"Direferensikan oleh GeoServer FeatureType {ws}:{ft_name} pada datastore {ds_name}"
+    except Exception as e:
+        logger.warning(f"GeoServer catalog check failed during table reference check for '{table_name}': {e}")
+        return True, f"Pengecekan katalog GeoServer gagal ({e}); tabel fisik dipertahankan sebagai pengaman."
+
+    return False, None
+
+def _is_file_referenced_elsewhere(
+    db: Session,
+    file_path: str,
+    exclude_ras_id: Optional[uuid.UUID] = None,
+    exclude_ws: Optional[str] = None,
+    exclude_store: Optional[str] = None
+) -> Tuple[bool, Optional[str]]:
+    """
+    Memeriksa apakah file raster fisik masih direferensikan oleh:
+    1. RasterMetadata lain di PostgreSQL.
+    2. CoverageStore manapun di SEMUA workspace GeoServer (path dinormalisasi).
+    Jika pengecekan ke GeoServer gagal, mengembalikan (True, reason) sebagai fail-safe.
+    """
+    if not file_path:
+        return False, None
+
+    norm_target = os.path.basename(file_path.replace("file:", "").strip())
+
+    # 1. Cek DB RasterMetadata
+    query = db.query(RasterMetadata).filter(RasterMetadata.file_path.isnot(None))
+    if exclude_ras_id:
+        query = query.filter(RasterMetadata.id != exclude_ras_id)
+    other_ras = query.all()
+    for r in other_ras:
+        if r.file_path:
+            norm_db = os.path.basename(r.file_path.replace("file:", "").strip())
+            if norm_db == norm_target:
+                return True, f"Direferensikan oleh RasterMetadata lain di DB (id={r.id}, store={r.store_name})"
+
+    # 2. Cek semua coverage store di semua workspace GeoServer
+    try:
+        raw_workspaces = geoserver_client.get_workspaces()
+        for ws_info in raw_workspaces:
+            ws = ws_info.get("name")
+            if not ws:
+                continue
+            cstores = geoserver_client.get_coverage_stores(ws)
+            for cs in cstores:
+                cs_name = cs.get("name")
+                if exclude_ws and exclude_store and ws == exclude_ws and cs_name == exclude_store:
+                    continue
+                cs_detail = geoserver_client.get_coverage_store(ws, cs_name)
+                if cs_detail:
+                    cs_url = cs_detail.get("url", "")
+                    clean_cs_file = os.path.basename(cs_url.replace("file:", "").strip())
+                    if clean_cs_file == norm_target:
+                        return True, f"Direferensikan oleh GeoServer CoverageStore {ws}:{cs_name}"
+    except Exception as e:
+        logger.warning(f"GeoServer catalog check failed during file reference check for '{norm_target}': {e}")
+        return True, f"Pengecekan katalog GeoServer gagal ({e}); file fisik dipertahankan sebagai pengaman."
+
+    return False, None
 
 @router.post("/batch-delete")
 def batch_delete_layers(
@@ -472,39 +593,64 @@ def batch_delete_layers(
     for lid in req.layer_ids:
         try:
             is_uuid = _is_valid_uuid(lid)
-            vec = db.query(VectorLayer).filter(VectorLayer.api_key_id == caller.id).filter(
-                (VectorLayer.id == uuid.UUID(lid) if is_uuid else False) |
-                (VectorLayer.table_name == lid) |
-                (VectorLayer.layer_name == lid)
-            ).first()
+            # Resolusi layer tanpa filter pemanggil
+            vec_query = db.query(VectorLayer)
+            if is_uuid:
+                vec = vec_query.filter(
+                    (VectorLayer.id == uuid.UUID(lid)) |
+                    (VectorLayer.table_name == lid) |
+                    (VectorLayer.layer_name == lid)
+                ).first()
+            else:
+                vec = vec_query.filter(
+                    (VectorLayer.table_name == lid) |
+                    (VectorLayer.layer_name == lid)
+                ).first()
 
             if vec:
+                # Otorisasi: hanya owner atau PRIMARY yang boleh menghapus
+                if caller.key_type != ApiKeyType.PRIMARY and vec.api_key_id != caller.id:
+                    continue
+
                 actual_ws = vec.workspace_name
-                # Hapus layer resource dari GeoServer
+                # 1. Hapus entri GeoWebCache (GWC) terlebih dahulu
+                try:
+                    geoserver_client.delete_gwc_layer(actual_ws, vec.table_name)
+                except Exception as e:
+                    logger.warning(f"GWC delete vector notice: {e}")
+
+                # 2. Hapus layer & feature type dari GeoServer (idempotent, toleran 404/500)
                 try:
                     geoserver_client.delete_layer(workspace_name=actual_ws, layer_name=vec.table_name, recurse=True)
-                except Exception:
-                    pass
-                # Hapus FeatureType dari datastore PostGIS di GeoServer
+                except Exception as e:
+                    logger.warning(f"GeoServer delete_layer vector notice: {e}")
                 try:
                     geoserver_client.delete_feature_type(workspace_name=actual_ws, store_name="postgis_default", feature_type_name=vec.table_name, recurse=True)
-                except Exception:
-                    pass
-                # Hapus tabel PostGIS
-                try:
-                    with spatial_engine.begin() as conn:
-                        conn.execute(text(f'DROP TABLE IF EXISTS "{vec.table_name}" CASCADE;'))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"GeoServer delete_feature_type vector notice: {e}")
+
+                # 3. Hapus tabel PostGIS jika tidak direferensikan layer lain di DB maupun datastore
+                is_ref, reason = _is_table_referenced_elsewhere(db, vec.table_name, exclude_vec_id=vec.id, exclude_ws=actual_ws, exclude_ft=vec.table_name)
+                if not is_ref:
+                    try:
+                        with spatial_engine.begin() as conn:
+                            conn.execute(text(f'DROP TABLE IF EXISTS "{vec.table_name}" CASCADE;'))
+                    except Exception as e:
+                        logger.warning(f"PostGIS drop table notice: {e}")
+                else:
+                    logger.info(f"Tabel {vec.table_name} masih direferensikan ({reason}), dilewati DROP TABLE.")
+
                 # Hapus file fisik jika ada
                 if vec.file_path and os.path.exists(vec.file_path):
-                    try:
-                        os.remove(vec.file_path)
-                    except Exception:
-                        pass
+                    f_ref, f_reason = _is_file_referenced_elsewhere(db, vec.file_path)
+                    if not f_ref:
+                        try:
+                            os.remove(vec.file_path)
+                        except Exception:
+                            pass
+
                 # Hapus staging file dari IngestJob yang terkait
                 ingest_jobs = db.query(IngestJob).filter(
-                    IngestJob.owner_id == caller.id,
                     IngestJob.result_layer_name == vec.table_name
                 ).all()
                 for ij in ingest_jobs:
@@ -514,42 +660,86 @@ def batch_delete_layers(
                         except Exception:
                             pass
                     db.delete(ij)
+
+                # 4. Baris metadata PostgreSQL TERAKHIR
                 invalidate_schema_cache(str(vec.id))
                 db.delete(vec)
                 db.commit()
                 deleted_count += 1
                 continue
 
-            ras = db.query(RasterMetadata).filter(RasterMetadata.api_key_id == caller.id).filter(
-                (RasterMetadata.id == uuid.UUID(lid) if is_uuid else False) |
-                (RasterMetadata.store_name == lid) |
-                (RasterMetadata.layer_name == lid) |
-                (RasterMetadata.store_name == f"store_{lid}")
-            ).first()
+            ras_query = db.query(RasterMetadata)
+            if is_uuid:
+                ras = ras_query.filter(
+                    (RasterMetadata.id == uuid.UUID(lid)) |
+                    (RasterMetadata.store_name == lid) |
+                    (RasterMetadata.layer_name == lid) |
+                    (RasterMetadata.store_name == f"store_{lid}")
+                ).first()
+            else:
+                ras = ras_query.filter(
+                    (RasterMetadata.store_name == lid) |
+                    (RasterMetadata.layer_name == lid) |
+                    (RasterMetadata.store_name == f"store_{lid}")
+                ).first()
 
             if ras:
+                if caller.key_type != ApiKeyType.PRIMARY and ras.api_key_id != caller.id:
+                    continue
+
                 actual_ws = ras.workspace_name
-                for target_lyr in [ras.store_name, ras.layer_name, ras.store_name.replace("store_", "")]:
+                targets = [ras.store_name, ras.layer_name, ras.store_name.replace("store_", "")]
+                # 1. Hapus entri GeoWebCache (GWC) terlebih dahulu
+                for target_lyr in targets:
+                    try:
+                        geoserver_client.delete_gwc_layer(actual_ws, target_lyr)
+                    except Exception:
+                        pass
+
+                # 2. Hapus layer & coverage store dari GeoServer
+                for target_lyr in targets:
                     try:
                         geoserver_client.delete_layer(workspace_name=actual_ws, layer_name=target_lyr, recurse=True)
                     except Exception:
                         pass
                 try:
                     geoserver_client.delete_coverage_store(workspace_name=actual_ws, store_name=ras.store_name, recurse=True)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"GeoServer delete_coverage_store notice: {e}")
+
+                # 3. Hapus file fisik raster jika tidak direferensikan di DB
                 if ras.file_path and os.path.exists(ras.file_path):
-                    try:
-                        os.remove(ras.file_path)
-                    except Exception:
-                        pass
+                    f_ref, f_reason = _is_file_referenced_elsewhere(db, ras.file_path, exclude_ras_id=ras.id, exclude_ws=actual_ws, exclude_store=ras.store_name)
+                    if not f_ref:
+                        try:
+                            os.remove(ras.file_path)
+                        except Exception:
+                            pass
+
+                # 4. Baris metadata PostgreSQL TERAKHIR
                 db.delete(ras)
                 db.commit()
                 deleted_count += 1
                 continue
 
-            # Fallback jika orphan di GeoServer
-            deleted_count += 1
+            # Fallback jika orphan di GeoServer / DB: HANYA jika PRIMARY dan req.orphan_cleanup=True
+            if caller.key_type == ApiKeyType.PRIMARY and req.orphan_cleanup:
+                try:
+                    geoserver_client.delete_layer(workspace_name="ws_flowgis_ba3523", layer_name=lid, recurse=True)
+                except Exception:
+                    pass
+                try:
+                    geoserver_client.delete_feature_type(workspace_name="ws_flowgis_ba3523", store_name="postgis_default", feature_type_name=lid, recurse=True)
+                except Exception:
+                    pass
+                is_ref, _ = _is_table_referenced_elsewhere(db, lid)
+                if not is_ref:
+                    try:
+                        with spatial_engine.begin() as conn:
+                            conn.execute(text(f'DROP TABLE IF EXISTS "{lid}" CASCADE;'))
+                    except Exception:
+                        pass
+                deleted_count += 1
         except Exception as e:
             logger.warning(f"Error batch deleting layer {lid}: {e}")
             errors.append(f"{lid}: {str(e)}")
@@ -574,27 +764,30 @@ def delete_layer(
     workspace_name: str,
     layer_name: str,
     layer_id: Optional[str] = None,
+    orphan_cleanup: bool = False,
     recurse: bool = True,
     db: Session = Depends(get_db),
     caller: ApiKey = Depends(require_any_key)
 ):
     """
     Menghapus layer secara komprehensif:
-    1. Mencari di database (VectorLayer / RasterMetadata) milik caller.
-    2. Menghapus konfigurasi di GeoServer (layer & coverage store / feature type).
-    3. Menghapus tabel di PostGIS (jika vector).
-    4. Menghapus file fisik di storage lokal.
-    5. Menghapus record baris di database PostgreSQL.
-    Toleran terhadap layer yang sudah terhapus di GeoServer (tidak melempar 500).
+    1. Mencari di database (VectorLayer / RasterMetadata) tanpa filter awal.
+    2. Jika ditemukan: verifikasi kepemilikan (owner atau PRIMARY). Jika bukan -> 404.
+    3. Verifikasi workspace: actual_ws_name diambil dari metadata DB. Jika tidak cocok -> 404.
+    4. Jika TIDAK ditemukan di DB: pembersihan orphan HANYA diizinkan jika caller PRIMARY dan orphan_cleanup=True. Jika tidak -> 404.
+    5. Menghapus konfigurasi di GeoServer (layer & coverage store / feature type, GWC).
+    6. Menghapus tabel PostGIS / file fisik storage lokal jika tidak direferensikan elsewhere.
+    7. Mengembalikan status storage_retained dan alasan jika ada referensi silang.
+    8. Menghapus record baris di PostgreSQL.
     """
     ws_meta = resolve_workspace(db, workspace_name)
-    actual_ws_name = ws_meta.workspace_name if ws_meta else workspace_name
+    resolved_url_ws = ws_meta.workspace_name if ws_meta else workspace_name
 
     vec = None
     ras = None
 
-    # Cari vector layer
-    vec_query = db.query(VectorLayer).filter(VectorLayer.api_key_id == caller.id)
+    # 1. Resolusi VectorLayer TANPA filter pemanggil
+    vec_query = db.query(VectorLayer)
     if layer_id:
         try:
             vec = vec_query.filter(VectorLayer.id == uuid.UUID(layer_id)).first()
@@ -612,9 +805,9 @@ def delete_layer(
             (VectorLayer.layer_name == layer_name)
         ).first()
 
-    # Cari raster jika bukan vector
+    # 2. Resolusi RasterMetadata TANPA filter pemanggil
     if not vec:
-        ras_query = db.query(RasterMetadata).filter(RasterMetadata.api_key_id == caller.id)
+        ras_query = db.query(RasterMetadata)
         if layer_id:
             try:
                 ras = ras_query.filter(RasterMetadata.id == uuid.UUID(layer_id)).first()
@@ -633,42 +826,85 @@ def delete_layer(
                 (RasterMetadata.store_name == f"store_{layer_name}")
             ).first()
 
+    target_obj = vec or ras
+
+    if target_obj:
+        # Cek otorisasi kepemilikan
+        is_owner = (target_obj.api_key_id == caller.id)
+        is_primary = (caller.key_type == ApiKeyType.PRIMARY)
+        if not (is_owner or is_primary):
+            # Tolak 404 agar tidak membocorkan keberadaan layer milik user lain
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Layer '{layer_name}' tidak ditemukan."
+            )
+
+        # Cek workspace kecocokan: actual_ws_name dari DB metadata
+        actual_ws_name = target_obj.workspace_name
+        if actual_ws_name != workspace_name and actual_ws_name != resolved_url_ws:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Layer '{layer_name}' tidak ditemukan pada workspace '{workspace_name}'."
+            )
+    else:
+        # Tidak ditemukan di DB: hanya boleh orphan cleanup oleh PRIMARY dengan flag eksplisit
+        if caller.key_type != ApiKeyType.PRIMARY or not orphan_cleanup:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Layer '{layer_name}' tidak ditemukan."
+            )
+        actual_ws_name = resolved_url_ws
+
+    storage_retained = False
+    storage_retention_reason = None
     deleted_something = False
 
     # 2. Proses penghapusan Vector
     if vec:
-        # Hapus layer resource dari GeoServer
+        target_table = vec.table_name
+        # 1. Hapus konfigurasi tile cache GeoWebCache (best effort)
         try:
-            geoserver_client.delete_layer(workspace_name=actual_ws_name, layer_name=vec.table_name, recurse=recurse)
-        except Exception as e:
-            logger.warning(f"GeoServer delete_layer vector notice: {e}")
-        # Hapus konfigurasi tile cache GeoWebCache (best effort)
-        try:
-            geoserver_client.delete_gwc_layer(actual_ws_name, vec.table_name)
+            geoserver_client.delete_gwc_layer(actual_ws_name, target_table)
         except Exception:
             pass
-        # Hapus FeatureType dari datastore PostGIS di GeoServer
+
+        # 2. Hapus layer & feature type dari GeoServer (idempotent, toleran 404/500)
         try:
-            geoserver_client.delete_feature_type(workspace_name=actual_ws_name, store_name="postgis_default", feature_type_name=vec.table_name, recurse=recurse)
+            geoserver_client.delete_layer(workspace_name=actual_ws_name, layer_name=target_table, recurse=recurse)
+        except Exception as e:
+            logger.warning(f"GeoServer delete_layer vector notice: {e}")
+        try:
+            geoserver_client.delete_feature_type(workspace_name=actual_ws_name, store_name="postgis_default", feature_type_name=target_table, recurse=recurse)
         except Exception as e:
             logger.warning(f"GeoServer delete_feature_type vector notice: {e}")
 
-        try:
-            with spatial_engine.begin() as conn:
-                conn.execute(text(f'DROP TABLE IF EXISTS "{vec.table_name}" CASCADE;'))
-        except Exception as e:
-            logger.warning(f"PostGIS drop table notice: {e}")
+        # 3. Hapus tabel PostGIS jika tidak direferensikan layer lain di DB maupun datastore
+        is_ref, reason = _is_table_referenced_elsewhere(db, target_table, exclude_vec_id=vec.id, exclude_ws=actual_ws_name, exclude_ft=target_table)
+        if not is_ref:
+            try:
+                with spatial_engine.begin() as conn:
+                    conn.execute(text(f'DROP TABLE IF EXISTS "{target_table}" CASCADE;'))
+            except Exception as e:
+                logger.warning(f"PostGIS drop table notice: {e}")
+        else:
+            storage_retained = True
+            storage_retention_reason = reason
+            logger.info(f"Tabel PostGIS '{target_table}' dipertahankan: {reason}")
 
         if vec.file_path and os.path.exists(vec.file_path):
-            try:
-                os.remove(vec.file_path)
-            except Exception:
-                pass
+            f_ref, f_reason = _is_file_referenced_elsewhere(db, vec.file_path)
+            if not f_ref:
+                try:
+                    os.remove(vec.file_path)
+                except Exception:
+                    pass
+            else:
+                storage_retained = True
+                storage_retention_reason = storage_retention_reason or f_reason
 
         # Hapus staging file dari IngestJob yang terkait
         ingest_jobs = db.query(IngestJob).filter(
-            IngestJob.owner_id == caller.id,
-            IngestJob.result_layer_name == vec.table_name
+            IngestJob.result_layer_name == target_table
         ).all()
         for ij in ingest_jobs:
             if ij.staging_file_path and os.path.exists(ij.staging_file_path):
@@ -678,6 +914,7 @@ def delete_layer(
                     pass
             db.delete(ij)
 
+        # 4. Baris metadata PostgreSQL TERAKHIR
         invalidate_schema_cache(str(vec.id))
         db.delete(vec)
         db.commit()
@@ -686,13 +923,17 @@ def delete_layer(
     # 3. Proses penghapusan Raster
     elif ras:
         targets = set([ras.store_name, ras.layer_name, ras.store_name.replace("store_", "")])
+        # 1. Hapus konfigurasi tile cache GeoWebCache (best effort)
+        for target_lyr in targets:
+            try:
+                geoserver_client.delete_gwc_layer(actual_ws_name, target_lyr)
+            except Exception:
+                pass
+
+        # 2. Hapus layer & coverage store dari GeoServer
         for target_lyr in targets:
             try:
                 geoserver_client.delete_layer(workspace_name=actual_ws_name, layer_name=target_lyr, recurse=recurse)
-            except Exception:
-                pass
-            try:
-                geoserver_client.delete_gwc_layer(actual_ws_name, target_lyr)
             except Exception:
                 pass
         try:
@@ -700,24 +941,36 @@ def delete_layer(
         except Exception as e:
             logger.warning(f"GeoServer delete_coverage_store notice: {e}")
 
+        # 3. Hapus file fisik jika tidak direferensikan di DB maupun coverage store
         if ras.file_path and os.path.exists(ras.file_path):
-            try:
-                os.remove(ras.file_path)
-            except Exception:
-                pass
+            f_ref, f_reason = _is_file_referenced_elsewhere(db, ras.file_path, exclude_ras_id=ras.id, exclude_ws=actual_ws_name, exclude_store=ras.store_name)
+            if not f_ref:
+                try:
+                    os.remove(ras.file_path)
+                except Exception:
+                    pass
+            else:
+                storage_retained = True
+                storage_retention_reason = f_reason
+                logger.info(f"File raster '{ras.file_path}' dipertahankan: {f_reason}")
 
+        # 4. Baris metadata PostgreSQL TERAKHIR
         db.delete(ras)
         db.commit()
         deleted_something = True
 
-    # 4. Fallback jika tidak tercatat di DB (misal orphan di GeoServer)
-    if not deleted_something:
+    # 4. Fallback jika tidak tercatat di DB (HANYA jika PRIMARY dan orphan_cleanup=True)
+    elif caller.key_type == ApiKeyType.PRIMARY and orphan_cleanup:
         try:
             geoserver_client.delete_layer(workspace_name=actual_ws_name, layer_name=layer_name, recurse=recurse)
         except Exception:
             pass
         try:
             geoserver_client.delete_layer(workspace_name=actual_ws_name, layer_name=f"store_{layer_name}", recurse=recurse)
+        except Exception:
+            pass
+        try:
+            geoserver_client.delete_feature_type(workspace_name=actual_ws_name, store_name="postgis_default", feature_type_name=layer_name, recurse=recurse)
         except Exception:
             pass
         try:
@@ -734,15 +987,52 @@ def delete_layer(
         except Exception:
             pass
 
+        # PostGIS table clean jika tidak direferensikan di DB
+        is_ref, reason = _is_table_referenced_elsewhere(db, layer_name)
+        if not is_ref:
+            try:
+                with spatial_engine.begin() as conn:
+                    conn.execute(text(f'DROP TABLE IF EXISTS "{layer_name}" CASCADE;'))
+            except Exception:
+                pass
+        else:
+            storage_retained = True
+            storage_retention_reason = reason
+
+        # Raster file clean jika tidak direferensikan di DB
+        disk_file = f"/data_raster/{layer_name}.tif"
+        if os.path.exists(disk_file):
+            f_ref, f_reason = _is_file_referenced_elsewhere(db, disk_file)
+            if not f_ref:
+                try:
+                    os.remove(disk_file)
+                except Exception:
+                    pass
+            else:
+                storage_retained = True
+                storage_retention_reason = storage_retention_reason or f_reason
+        deleted_something = True
+
+    audit_detail = f"deleted (storage_retained={storage_retained})"
+    if storage_retention_reason:
+        audit_detail += f" reason: {storage_retention_reason}"
+
     log_action(
         db=db,
         api_key=caller,
         action="DELETE_LAYER",
         resource_type="LAYER",
-        resource_name=layer_name,
-        status="SUCCESS"
+        resource_name=f"{actual_ws_name}:{layer_name}",
+        status="SUCCESS",
+        detail=audit_detail
     )
-    return {"success": True, "detail": f"Layer '{layer_name}' berhasil dihapus."}
+
+    return {
+        "success": True,
+        "detail": f"Layer '{layer_name}' berhasil dihapus.",
+        "storage_retained": storage_retained,
+        "storage_retention_reason": storage_retention_reason
+    }
 
 @router.get("/{layer_name}")
 def get_layer_metadata(

@@ -114,6 +114,12 @@ class GeoServerClient:
             return res.json().get("dataStore")
         return None
 
+    def get_feature_types(self, workspace_name: str, store_name: str) -> List[Dict[str, Any]]:
+        res = self._request("GET", f"/rest/workspaces/{workspace_name}/datastores/{store_name}/featuretypes.json")
+        if res.status_code == 200:
+            return self._extract_list(res.json(), "featureTypes", "featureType")
+        return []
+
     def ensure_postgis_datastore(
         self,
         workspace_name: str,
@@ -238,11 +244,18 @@ class GeoServerClient:
         return res.status_code in (200, 201)
 
     def delete_layer(self, workspace_name: str, layer_name: str, recurse: bool = True) -> bool:
+        """Menghapus layer dari GeoServer (idempotent, toleran terhadap 404)."""
         res = self._request(
             "DELETE",
             f"/rest/workspaces/{workspace_name}/layers/{layer_name}?recurse={str(recurse).lower()}"
         )
-        return res.status_code in (200, 204, 404)
+        if res.status_code not in (200, 204, 404):
+            res_global = self._request(
+                "DELETE",
+                f"/rest/layers/{workspace_name}:{layer_name}?recurse={str(recurse).lower()}"
+            )
+            return res_global.status_code in (200, 204, 404)
+        return True
 
     def delete_feature_type(self, workspace_name: str, store_name: str, feature_type_name: str, recurse: bool = True) -> bool:
         """Menghapus FeatureType dari DataStore GeoServer (vector layer resource)."""
@@ -618,6 +631,110 @@ class GeoServerClient:
             return res.json()
         except Exception:
             return {"raw": res.text}
+
+    def describe_coverage(self, workspace_name: str, coverage_id: str) -> Dict[str, Any]:
+        """
+        Mengambil deskripsi WCS 2.0.1 DescribeCoverage untuk coverage tertentu.
+        Mengekstrak envelope SRS, axisLabels, lowerCorner, upperCorner, dan fields/bands.
+        """
+        path = f"{workspace_name}/wcs"
+        params = {
+            "service": "WCS",
+            "version": "2.0.1",
+            "request": "DescribeCoverage",
+            "coverageId": coverage_id
+        }
+        res = self._request("GET", path, params=params)
+        if res.status_code != 200:
+            err = self._parse_ows_exception(res.text)
+            raise ValueError(f"GeoServer DescribeCoverage error ({res.status_code}): {err}")
+
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(res.text)
+
+        envelope_srs = None
+        axis_labels: List[str] = []
+        lower_corner = None
+        upper_corner = None
+        coverage_id_val = None
+
+        for elem in root.iter():
+            tag = elem.tag.split("}")[-1]
+            if tag == "CoverageId" and elem.text and not coverage_id_val:
+                coverage_id_val = elem.text.strip()
+            elif tag in ("EnvelopeWithTimePeriod", "Envelope"):
+                envelope_srs = elem.attrib.get("srsName")
+                axis_labels = elem.attrib.get("axisLabels", "").split()
+            elif tag == "lowerCorner" and elem.text:
+                lower_corner = elem.text.strip()
+            elif tag == "upperCorner" and elem.text:
+                upper_corner = elem.text.strip()
+
+        fields = []
+        for elem in root.iter():
+            tag = elem.tag.split("}")[-1]
+            if tag == "Field":
+                f_name = elem.attrib.get("name", "")
+                f_def = ""
+                f_nil = None
+                for c in elem.iter():
+                    c_tag = c.tag.split("}")[-1]
+                    if c_tag == "definition" and c.text:
+                        f_def = c.text.strip()
+                    elif c_tag == "nilValue" and c.text:
+                        f_nil = c.text.strip()
+                fields.append({"name": f_name, "definition": f_def, "nil_value": f_nil})
+
+        return {
+            "coverage_id": coverage_id_val,
+            "srs_name": envelope_srs,
+            "axis_labels": axis_labels,
+            "lower_corner": lower_corner,
+            "upper_corner": upper_corner,
+            "fields": fields,
+            "raw_xml": res.text
+        }
+
+    def get_coverage(
+        self,
+        workspace_name: str,
+        coverage_id: str,
+        subsets: Optional[List[str]] = None,
+        scalefactor: Optional[float] = None,
+        interpolation: Optional[str] = None,
+        format_type: str = "image/tiff",
+        timeout: int = 30
+    ) -> bytes:
+        """
+        Memanggil WCS 2.0.1 GetCoverage untuk mengunduh stream GeoTIFF (atau format lain).
+        Mendukung multiple `subset` params, `scalefactor`, dan `interpolation`.
+        """
+        path = f"{workspace_name}/wcs"
+        query_params = [
+            ("service", "WCS"),
+            ("version", "2.0.1"),
+            ("request", "GetCoverage"),
+            ("coverageId", coverage_id),
+            ("format", format_type)
+        ]
+        if subsets:
+            for s in subsets:
+                val = s.replace("subset=", "") if s.startswith("subset=") else s
+                query_params.append(("subset", val))
+        if scalefactor is not None:
+            query_params.append(("scalefactor", str(scalefactor)))
+        if interpolation:
+            query_params.append(("interpolation", interpolation))
+
+        import urllib.parse
+        encoded_params = urllib.parse.urlencode(query_params)
+        full_path = f"{path}?{encoded_params}"
+
+        res = self._request("GET", full_path, timeout=timeout)
+        if res.status_code != 200:
+            err = self._parse_ows_exception(res.text)
+            raise ValueError(f"GeoServer GetCoverage error ({res.status_code}): {err}")
+        return res.content
 
 geoserver_client = GeoServerClient()
 
